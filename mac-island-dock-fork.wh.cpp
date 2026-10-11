@@ -903,6 +903,11 @@ apps, então o resto da parte de baixo da tela continua clicável), ou como ela
     $name:pt-BR: Altura (px)
     $description: Of the dock itself. If the taskbar is taller, the room above the dock is left for the magnified icons (28-64, default 38)
     $description:pt-BR: Da própria dock. Se a barra de tarefas for mais alta, o espaço acima da dock fica para os ícones ampliados (28-64, padrão 38)
+  - sidePadding: 12
+    $name: Room at the ends (px)
+    $name:pt-BR: Espaço nas pontas (px)
+    $description: Between the first and last icons and the dock's edges (0-32, default 12)
+    $description:pt-BR: Entre o primeiro e o último ícone e as bordas da dock (0-32, padrão 12)
   - bottomGap: 6
     $name: Gap at the bottom (px)
     $name:pt-BR: Espaço embaixo (px)
@@ -1078,6 +1083,8 @@ struct {
     double cornerRadius;
     double dockHeight;
     double bottomGap;
+    // Between the icons at the ends and the dock's edges.
+    double sidePadding;
     double backgroundOpacity;
     int showDuration;
     int hideDuration;
@@ -2065,15 +2072,19 @@ void StyleDockBackground(Shapes::Rectangle const& fill) {
     SetStyled(fill, Shapes::Shape::StrokeProperty(), CreateDockBorder());
 }
 
-// Gives an element the dock's height, at the bottom of the taskbar.
-void SetDockGeometry(FrameworkElement const& element, double rightMargin) {
+// Gives an element the dock's height, at the bottom of the taskbar. `outset`
+// widens it past its room on both sides (the dock's background reaching over
+// the panel's padding, so the icons have room at the ends).
+void SetDockGeometry(FrameworkElement const& element,
+                     double rightMargin,
+                     double outset = 0) {
     SetStyled(element, FrameworkElement::HeightProperty(),
               winrt::box_value(g_settings.dockHeight));
     SetStyled(element, FrameworkElement::VerticalAlignmentProperty(),
               winrt::box_value(VerticalAlignment::Bottom));
     SetStyled(element, FrameworkElement::MarginProperty(),
               winrt::box_value(ThicknessHelper::FromLengths(
-                  0, 0, rightMargin, g_settings.bottomGap)));
+                  -outset, 0, rightMargin - outset, g_settings.bottomGap)));
 }
 
 void WatchFrameWidth(FrameworkElement const& frame) {
@@ -3506,8 +3517,12 @@ bool ApplyStyle(XamlRoot xamlRoot, HWND hWnd, bool mainTaskbar) {
     // The dock has its own height, at the bottom of the taskbar. Whatever the
     // taskbar has above it stays transparent: room for the magnified icons,
     // and the strip that stays on screen while the taskbar is hidden.
+    // The padding keeps the icons off the dock's edges: the background
+    // reaches over it (see SetDockGeometry), the icons stay inside it.
+    const double sidePadding = g_settings.sidePadding;
     SetStyled(rootGrid, Controls::Grid::PaddingProperty(),
-              winrt::box_value(ThicknessHelper::FromLengths(8, 0, 8, 0)));
+              winrt::box_value(
+                  ThicknessHelper::FromLengths(sidePadding, 0, sidePadding, 0)));
 
     // The dock's look goes on the taskbar's own background rectangle, which
     // lies behind the icons. Rounding the panel that holds the icons would
@@ -3517,6 +3532,10 @@ bool ApplyStyle(XamlRoot xamlRoot, HWND hWnd, bool mainTaskbar) {
             FindByClassName(rootGrid, L"Taskbar.TaskbarBackground")) {
         fill = FindByName(background, L"BackgroundFill")
                    .try_as<Shapes::Rectangle>();
+        // Over the panel's padding, to the frame's edges.
+        SetStyled(background, FrameworkElement::MarginProperty(),
+                  winrt::box_value(ThicknessHelper::FromLengths(
+                      -sidePadding, 0, -sidePadding, 0)));
         if (auto stroke = FindByName(background, L"BackgroundStroke")) {
             SetStyled(stroke, UIElement::VisibilityProperty(),
                       winrt::box_value(Visibility::Collapsed));
@@ -38358,6 +38377,8 @@ void LoadSettings() {
         std::clamp(Wh_GetIntSetting(L"dock.cornerRadius"), 0, 24);
     g_settings.dockHeight = std::clamp(Wh_GetIntSetting(L"dock.dockHeight"), 28, 64);
     g_settings.bottomGap = std::clamp(Wh_GetIntSetting(L"dock.bottomGap"), 0, 16);
+    g_settings.sidePadding =
+        std::clamp(Wh_GetIntSetting(L"dock.sidePadding"), 0, 32);
     g_settings.backgroundOpacity =
         std::clamp(Wh_GetIntSetting(L"dock.backgroundOpacity"), 0, 100) / 100.0;
     g_settings.showDuration =
