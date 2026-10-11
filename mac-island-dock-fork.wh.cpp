@@ -802,6 +802,11 @@ apps, então o resto da parte de baixo da tela continua clicável), ou como ela
   $name:pt-BR: Espalhar os itens pela barra, como no macOS
   $description: Only with the island as a full-width bar. The power button, the apps with notifications, what's playing, weather, notes, tasks, shortcuts and updates go to the left end; the tray icons, usage, microphone, theme, network, volume, battery, bell and clock to the right end (in the order chosen in the island). With "clock in the middle", the clock sits alone at the center. Off, everything is together at the right end
   $description:pt-BR: Só com a ilha como barra de largura total. O botão de desligar, os apps com notificações, o que está tocando, clima, anotações, tarefas, atalhos e atualizações vão para a ponta esquerda; os ícones da bandeja, uso, microfone, tema, rede, volume, bateria, sino e relógio para a ponta direita (na ordem escolhida na ilha). Com "relógio no meio", o relógio fica sozinho no centro. Desligado, tudo fica junto na ponta direita
+- barAllMonitors: true
+  $name: The bar on every monitor
+  $name:pt-BR: A barra em todos os monitores
+  $description: Only with the island as a full-width bar and more than one monitor. Each monitor gets the bar, with its strip kept for it. Clicking the bar on another monitor brings the island there, and its panels open there
+  $description:pt-BR: Só com a ilha como barra de largura total e mais de um monitor. Cada monitor ganha a barra, com a faixa dela reservada. Clicar na barra de outro monitor leva a ilha para lá, e os painéis abrem lá
 - barPills: true
   $name: Bar background only behind the items
   $name:pt-BR: Fundo da barra só atrás dos itens
@@ -1100,6 +1105,8 @@ struct {
     bool islandBarSpread;
     // The bar's background only behind its items, the rest clear.
     bool islandBarPills;
+    // The bar on the other monitors too (see BarMirror).
+    bool islandBarAllMonitors;
     // Panels opening out of the pill as wide as it, when it's wider than
     // them (otherwise they drop out of the clicked item, at their own width).
     bool islandPanelsFollow;
@@ -1591,6 +1598,7 @@ bool OwnsTaskbar() {
 
 constexpr WCHAR kIslandClassName[] = L"WindhawkMacIslandDockIsland";
 constexpr WCHAR kPanelClassName[] = L"WindhawkMacIslandDockPanel";
+constexpr WCHAR kMirrorClassName[] = L"WindhawkMacIslandDockMirror";
 // The notification watcher's message-only window (the sender of the apps
 // with new notifications, with the island off too).
 constexpr WCHAR kNotifierClassName[] = L"WindhawkMacIslandDockNotifier";
@@ -19669,6 +19677,33 @@ void UpdatesPanel::Draw(ID2D1RenderTarget* target, ID2D1SolidColorBrush* brush) 
 
 class StatusEvents;
 
+// The bar on another monitor (see islandBarAllMonitors): a window of its own
+// showing a copy of the island's bar, laid out for its width, and keeping
+// that monitor's strip at the top. The island itself is on one monitor at a
+// time; clicking a copy brings it there.
+struct BarMirror {
+    HMONITOR monitor = nullptr;
+    RECT rect{};
+    HWND hwnd = nullptr;
+    // Whether it keeps its monitor's strip: not on the chosen monitor, whose
+    // strip the island keeps (its copy there shows while it's away).
+    bool reserves = false;
+    bool appBar = false;
+    // The height its strip was kept for.
+    int reserved = 0;
+    // A full-screen app on its monitor: it's clear.
+    bool fullscreen = false;
+    HDC dc = nullptr;
+    HBITMAP bitmap = nullptr;
+    HGDIOBJ oldBitmap = nullptr;
+    void* bits = nullptr;
+    SIZE size{};
+    // For each of its columns, the island's column shown there, or -1.
+    std::vector<int> columns;
+};
+
+bool BarGroupOnLeft(PillGroup group);
+
 class Island {
    public:
     bool Create();
@@ -19677,6 +19712,9 @@ class Island {
     bool Animating() const { return m_animating; }
     void AnimationFrame();
     LRESULT HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+    // The bar's copies on the other monitors (see BarMirror).
+    LRESULT HandleMirrorMessage(HWND hWnd, UINT msg, WPARAM wParam,
+                                LPARAM lParam);
     void StartAnimating();
     // The drawing device was lost (see OnDrawingDeviceLost).
     void OnDeviceLost();
@@ -19892,6 +19930,27 @@ class Island {
     bool m_bar = false;
     // The bar's items at both ends, as last laid out (see Layout).
     bool m_barSpread = false;
+    // The bar's groups of items, as last drawn: its left end, the clock alone
+    // in the middle (or everything around a centered clock), and its right
+    // end; each kept at its place on a wider or narrower monitor.
+    D2D1_RECT_F m_barZones[3]{};
+    bool m_barZoneUsed[3]{};
+    void ComputeBarZones();
+    // The bar on the other monitors (see BarMirror).
+    std::vector<BarMirror> m_mirrors;
+    bool m_mirrorsOn = false;
+    // The monitor the island was brought to by clicking its copy there.
+    HMONITOR m_visitMonitor = nullptr;
+    bool MirrorsWanted() const;
+    // The monitor whose strip the island itself keeps: the chosen one.
+    HMONITOR HomeMonitor() const;
+    void SyncMirrors();
+    bool CreateMirror(BarMirror& mirror);
+    void DestroyMirror(BarMirror& mirror);
+    void DestroyMirrors();
+    void SetMirrorAppBar(BarMirror& mirror, int height);
+    void ComposeMirrors();
+    void VisitMonitor(HMONITOR monitor);
     winrt::com_ptr<ID2D1Factory> m_d2d;
     winrt::com_ptr<IDWriteFactory> m_dwrite;
     LayeredCanvas m_canvas;
@@ -20531,6 +20590,14 @@ LRESULT CALLBACK IslandWndProc(HWND hWnd, UINT msg, WPARAM wParam,
                                LPARAM lParam) {
     if (g_island) {
         return g_island->HandleMessage(hWnd, msg, wParam, lParam);
+    }
+    return DefWindowProc(hWnd, msg, wParam, lParam);
+}
+
+LRESULT CALLBACK MirrorWndProc(HWND hWnd, UINT msg, WPARAM wParam,
+                               LPARAM lParam) {
+    if (g_island) {
+        return g_island->HandleMirrorMessage(hWnd, msg, wParam, lParam);
     }
     return DefWindowProc(hWnd, msg, wParam, lParam);
 }
@@ -23269,7 +23336,8 @@ BOOL CALLBACK ListOpenAppsProc(HWND hWnd, LPARAM lParam) {
     GetClassName(hWnd, className, ARRAYSIZE(className));
     if (processId == GetCurrentProcessId() &&
         (_wcsicmp(className, kIslandClassName) == 0 ||
-         _wcsicmp(className, kPanelClassName) == 0)) {
+         _wcsicmp(className, kPanelClassName) == 0 ||
+         _wcsicmp(className, kMirrorClassName) == 0)) {
         return TRUE;
     }
     std::wstring appId = WindowAppKey(hWnd);
@@ -29824,8 +29892,9 @@ HMONITOR Island::CurrentMonitor() const {
                    : MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY);
 }
 
-// The monitor with the mouse (if chosen, with several), the one chosen, or
-// the taskbar's.
+// The monitor with the mouse (if chosen, with several), the one its bar was
+// clicked on (with the bar on every monitor), the one chosen, or the
+// taskbar's.
 HMONITOR Island::WantedMonitor() const {
     if (g_settings.islandFollowMouse && MonitorCount() > 1) {
         POINT pt;
@@ -29833,6 +29902,17 @@ HMONITOR Island::WantedMonitor() const {
             return MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
         }
     }
+    if (m_visitMonitor && MirrorsWanted()) {
+        MONITORINFO info{sizeof(info)};
+        if (GetMonitorInfo(m_visitMonitor, &info)) {
+            return m_visitMonitor;
+        }
+    }
+    return HomeMonitor();
+}
+
+// The one chosen, or the taskbar's.
+HMONITOR Island::HomeMonitor() const {
     if (!g_islandMonitor.empty()) {
         for (const auto& monitor : ListMonitors()) {
             if (monitor.device == g_islandMonitor) {
@@ -30052,6 +30132,7 @@ void Island::OnForegroundChanged() {
         GetClassName(foreground, className, ARRAYSIZE(className));
         if (_wcsicmp(className, kIslandClassName) == 0 ||
             _wcsicmp(className, kPanelClassName) == 0 ||
+            _wcsicmp(className, kMirrorClassName) == 0 ||
             _wcsicmp(className, L"Shell_TrayWnd") == 0 ||
             _wcsicmp(className, L"Shell_SecondaryTrayWnd") == 0) {
             return;
@@ -30496,6 +30577,10 @@ bool Island::Create() {
     windowClass.lpfnWndProc = PanelWndProc;
     windowClass.lpszClassName = kPanelClassName;
     RegisterClass(&windowClass);
+    windowClass.style = CS_DBLCLKS;
+    windowClass.lpfnWndProc = MirrorWndProc;
+    windowClass.lpszClassName = kMirrorClassName;
+    RegisterClass(&windowClass);
 
     m_hwnd = CreateWindowEx(
         WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
@@ -30730,6 +30815,7 @@ void Island::Destroy() {
     StopWatchingTrayAppWindows();
     m_trayIcons.clear();
     m_trayBitmaps.clear();
+    DestroyMirrors();
     if (m_appBar) {
         APPBARDATA data{sizeof(data)};
         data.hWnd = m_hwnd;
@@ -30748,20 +30834,401 @@ void Island::Destroy() {
     }
     UnregisterClass(kIslandClassName, g_module);
     UnregisterClass(kPanelClassName, g_module);
+    UnregisterClass(kMirrorClassName, g_module);
 }
 
 void Island::SetAppBarPosition() {
     if (!m_appBar) {
         return;
     }
+    // With the bar on every monitor, its strip stays on the chosen one (the
+    // others keep theirs), wherever the island is: no window jumps as it
+    // goes from one to another.
+    RECT area = m_monitor;
+    if (MirrorsWanted()) {
+        MONITORINFO info{sizeof(info)};
+        if (GetMonitorInfo(HomeMonitor(), &info)) {
+            area = info.rcMonitor;
+        }
+    }
     APPBARDATA data{sizeof(data)};
     data.hWnd = m_hwnd;
     data.uEdge = ABE_TOP;
-    data.rc = {m_monitor.left, m_monitor.top, m_monitor.right,
-               m_monitor.top + m_size.cy};
+    data.rc = {area.left, area.top, area.right, area.top + m_size.cy};
     SHAppBarMessage(ABM_QUERYPOS, &data);
     data.rc.bottom = data.rc.top + m_size.cy;
     SHAppBarMessage(ABM_SETPOS, &data);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// The bar on the other monitors (see BarMirror).
+
+// The bar's groups of items, from the items as placed: on the spread bar its
+// left end, the clock alone in the middle and its right end; otherwise all of
+// them together, at the right end or around a centered clock.
+void Island::ComputeBarZones() {
+    for (bool& used : m_barZoneUsed) {
+        used = false;
+    }
+    const bool clockAlone = m_barSpread && g_settings.islandClockCenter;
+    for (const auto& slot : m_slots) {
+        if (slot.group < 0 || slot.rect.right - slot.rect.left < 0.5f) {
+            continue;
+        }
+        const auto group = (PillGroup)slot.group;
+        const int zone =
+            !m_barSpread ? (g_settings.islandClockCenter ? 1 : 2)
+            : clockAlone && group == PillGroup::Clock ? 1
+            : BarGroupOnLeft(group)                   ? 0
+                                                      : 2;
+        if (!m_barZoneUsed[zone]) {
+            m_barZones[zone] = slot.rect;
+            m_barZoneUsed[zone] = true;
+        } else {
+            m_barZones[zone].left = std::min(m_barZones[zone].left, slot.rect.left);
+            m_barZones[zone].right =
+                std::max(m_barZones[zone].right, slot.rect.right);
+        }
+    }
+}
+
+bool Island::MirrorsWanted() const {
+    return m_bar && g_settings.islandBarAllMonitors && MonitorCount() > 1;
+}
+
+// A copy for each monitor, made and dropped as monitors come, go and move;
+// each keeps its monitor's strip, but the chosen one's (the island keeps it).
+void Island::SyncMirrors() {
+    const bool wanted = MirrorsWanted();
+    if (wanted != m_mirrorsOn) {
+        m_mirrorsOn = wanted;
+        // Its own strip goes to the chosen monitor, or back where it is.
+        SetAppBarPosition();
+    }
+    if (!wanted) {
+        DestroyMirrors();
+        m_visitMonitor = nullptr;
+        return;
+    }
+    const std::vector<MonitorEntry> monitors = ListMonitors();
+    const HMONITOR home = HomeMonitor();
+    bool changed = false;
+    for (size_t i = m_mirrors.size(); i-- > 0;) {
+        BarMirror& mirror = m_mirrors[i];
+        const bool kept =
+            mirror.reserves == (mirror.monitor != home) &&
+            std::any_of(monitors.begin(), monitors.end(),
+                        [&](const MonitorEntry& monitor) {
+                            return monitor.handle == mirror.monitor &&
+                                   EqualRect(&monitor.rect, &mirror.rect);
+                        });
+        if (!kept) {
+            DestroyMirror(mirror);
+            m_mirrors.erase(m_mirrors.begin() + i);
+            changed = true;
+        }
+    }
+    for (const auto& monitor : monitors) {
+        if (std::any_of(m_mirrors.begin(), m_mirrors.end(),
+                        [&](const BarMirror& mirror) {
+                            return mirror.monitor == monitor.handle;
+                        })) {
+            continue;
+        }
+        BarMirror mirror;
+        mirror.monitor = monitor.handle;
+        mirror.rect = monitor.rect;
+        mirror.reserves = monitor.handle != home;
+        if (CreateMirror(mirror)) {
+            m_mirrors.push_back(std::move(mirror));
+            changed = true;
+        }
+    }
+    for (auto& mirror : m_mirrors) {
+        const bool fullscreen = IsFullscreenAppOn(mirror.monitor);
+        if (fullscreen != mirror.fullscreen) {
+            mirror.fullscreen = fullscreen;
+            changed = true;
+        }
+    }
+    if (changed) {
+        ComposeMirrors();
+    }
+}
+
+bool Island::CreateMirror(BarMirror& mirror) {
+    mirror.hwnd = CreateWindowEx(
+        WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+        kMirrorClassName, L"", WS_POPUP, 0, 0, 0, 0, nullptr, nullptr,
+        g_module, nullptr);
+    if (!mirror.hwnd) {
+        Wh_Log(L"CreateWindowEx (mirror) failed: %u", GetLastError());
+        return false;
+    }
+    mirror.dc = CreateCompatibleDC(nullptr);
+    // Shown off the screen and clear, like the island (see m_away): it's
+    // drawn in place by ComposeMirrors.
+    ShowWindow(mirror.hwnd, SW_SHOWNOACTIVATE);
+    SetWindowPos(mirror.hwnd, HWND_TOPMOST, -32000, -32000, 1, 1,
+                 SWP_NOACTIVATE);
+    if (mirror.reserves) {
+        APPBARDATA data{sizeof(data)};
+        data.hWnd = mirror.hwnd;
+        data.uCallbackMessage = WM_APP_APPBAR;
+        mirror.appBar = SHAppBarMessage(ABM_NEW, &data) != FALSE;
+    }
+    SetMirrorAppBar(mirror, std::max((int)m_size.cy, 1));
+    return true;
+}
+
+void Island::DestroyMirror(BarMirror& mirror) {
+    if (mirror.appBar) {
+        APPBARDATA data{sizeof(data)};
+        data.hWnd = mirror.hwnd;
+        SHAppBarMessage(ABM_REMOVE, &data);
+        mirror.appBar = false;
+    }
+    if (mirror.hwnd) {
+        DestroyWindow(mirror.hwnd);
+        mirror.hwnd = nullptr;
+    }
+    if (mirror.dc) {
+        if (mirror.oldBitmap) {
+            SelectObject(mirror.dc, mirror.oldBitmap);
+            mirror.oldBitmap = nullptr;
+        }
+        DeleteDC(mirror.dc);
+        mirror.dc = nullptr;
+    }
+    if (mirror.bitmap) {
+        DeleteObject(mirror.bitmap);
+        mirror.bitmap = nullptr;
+        mirror.bits = nullptr;
+    }
+}
+
+void Island::DestroyMirrors() {
+    for (auto& mirror : m_mirrors) {
+        DestroyMirror(mirror);
+    }
+    m_mirrors.clear();
+}
+
+void Island::SetMirrorAppBar(BarMirror& mirror, int height) {
+    mirror.reserved = height;
+    if (!mirror.appBar) {
+        return;
+    }
+    APPBARDATA data{sizeof(data)};
+    data.hWnd = mirror.hwnd;
+    data.uEdge = ABE_TOP;
+    data.rc = {mirror.rect.left, mirror.rect.top, mirror.rect.right,
+               mirror.rect.top + height};
+    SHAppBarMessage(ABM_QUERYPOS, &data);
+    data.rc.bottom = data.rc.top + height;
+    SHAppBarMessage(ABM_SETPOS, &data);
+}
+
+// Copies the island's bar as last drawn onto each copy, its groups kept at
+// their places for the copy's width (see ComputeBarZones): the left end at
+// the left, the right end at the right, the middle in the middle. Clear on
+// the island's own monitor and over a full-screen app.
+void Island::ComposeMirrors() {
+    if (m_mirrors.empty()) {
+        return;
+    }
+    const BYTE* source = m_canvas.Bits();
+    const SIZE sourceSize = m_canvas.Size();
+    const int width = sourceSize.cx;
+    const int height = std::max((int)sourceSize.cy, 1);
+    const int side = (int)std::round(kIslandPadding * m_scale);
+    for (auto& mirror : m_mirrors) {
+        const int mirrorWidth = mirror.rect.right - mirror.rect.left;
+        if (mirrorWidth <= 0) {
+            continue;
+        }
+        const SIZE size{mirrorWidth, height};
+        if (!mirror.bitmap || mirror.size.cx != size.cx ||
+            mirror.size.cy != size.cy) {
+            if (mirror.bitmap) {
+                SelectObject(mirror.dc, mirror.oldBitmap);
+                DeleteObject(mirror.bitmap);
+                mirror.bitmap = nullptr;
+                mirror.bits = nullptr;
+            }
+            BITMAPINFO info{};
+            info.bmiHeader.biSize = sizeof(info.bmiHeader);
+            info.bmiHeader.biWidth = size.cx;
+            info.bmiHeader.biHeight = -size.cy;
+            info.bmiHeader.biPlanes = 1;
+            info.bmiHeader.biBitCount = 32;
+            info.bmiHeader.biCompression = BI_RGB;
+            mirror.bitmap = CreateDIBSection(mirror.dc, &info, DIB_RGB_COLORS,
+                                             &mirror.bits, nullptr, 0);
+            if (!mirror.bitmap) {
+                mirror.bits = nullptr;
+                continue;
+            }
+            mirror.oldBitmap = SelectObject(mirror.dc, mirror.bitmap);
+            mirror.size = size;
+        }
+        BYTE* bits = (BYTE*)mirror.bits;
+        memset(bits, 0, (size_t)size.cx * size.cy * 4);
+        mirror.columns.assign(mirrorWidth, -1);
+        const bool clear = !source || width <= 0 || !m_bar ||
+                           mirror.fullscreen ||
+                           mirror.monitor == m_monitorHandle;
+        if (!clear) {
+            if (mirrorWidth == width) {
+                for (int x = 0; x < width; x++) {
+                    mirror.columns[x] = x;
+                }
+            } else {
+                std::vector<bool> covered(width, false);
+                for (int i = 0; i < 3; i++) {
+                    if (!m_barZoneUsed[i]) {
+                        continue;
+                    }
+                    const int from = std::clamp(
+                        (int)std::floor(m_barZones[i].left) - side, 0, width);
+                    const int to = std::clamp(
+                        (int)std::ceil(m_barZones[i].right) + side, 0, width);
+                    const int offset = i == 0   ? 0
+                                       : i == 1 ? (mirrorWidth - width) / 2
+                                                : mirrorWidth - width;
+                    for (int x = from; x < to; x++) {
+                        covered[x] = true;
+                        const int at = x + offset;
+                        if (at >= 0 && at < mirrorWidth &&
+                            mirror.columns[at] < 0) {
+                            mirror.columns[at] = x;
+                        }
+                    }
+                }
+                // A bar filled from edge to edge: the room between the groups
+                // filled like the island's.
+                if (!g_settings.islandBarPills) {
+                    int gap = -1;
+                    for (int x = 0; x < width && gap < 0; x++) {
+                        if (!covered[x]) {
+                            gap = x;
+                        }
+                    }
+                    if (gap >= 0) {
+                        for (int& column : mirror.columns) {
+                            if (column < 0) {
+                                column = gap;
+                            }
+                        }
+                    }
+                }
+            }
+            for (int y = 0; y < height && y < sourceSize.cy; y++) {
+                const DWORD* from = (const DWORD*)(source + (size_t)y * width * 4);
+                DWORD* to = (DWORD*)(bits + (size_t)y * mirrorWidth * 4);
+                for (int x = 0; x < mirrorWidth; x++) {
+                    const int column = mirror.columns[x];
+                    if (column >= 0) {
+                        to[x] = from[column];
+                    }
+                }
+            }
+        }
+        // The island's height changed (another scaling): its strip follows.
+        if (mirror.reserved != height) {
+            SetMirrorAppBar(mirror, height);
+        }
+        POINT position{mirror.rect.left, mirror.rect.top};
+        POINT origin{0, 0};
+        SIZE windowSize = size;
+        BLENDFUNCTION blend{AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+        UpdateLayeredWindow(mirror.hwnd, nullptr, &position, &windowSize,
+                            mirror.dc, &origin, 0, &blend, ULW_ALPHA);
+    }
+}
+
+// Brought to another monitor by a click on its copy there: right away, so
+// the click lands on the island itself, and it stays there.
+void Island::VisitMonitor(HMONITOR monitor) {
+    m_visitMonitor = monitor;
+    if (monitor == m_monitorHandle) {
+        return;
+    }
+    CloseAllPanels();
+    HideGearBubble();
+    m_monitorMove = 0;
+    m_wantedMonitor = nullptr;
+    SwitchMonitor(monitor);
+    if (!IsFullscreenAppOn(monitor)) {
+        m_visible = true;
+        m_away = false;
+        m_appear = 1;
+        m_appearVelocity = 0;
+        if (!m_shownOnce) {
+            m_shownOnce = true;
+            ShowWindow(m_hwnd, SW_SHOWNOACTIVATE);
+        }
+    }
+    Render(true);
+    SetWindowPos(m_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+}
+
+LRESULT Island::HandleMirrorMessage(HWND hWnd, UINT msg, WPARAM wParam,
+                                    LPARAM lParam) {
+    auto mirror = std::find_if(
+        m_mirrors.begin(), m_mirrors.end(),
+        [&](const BarMirror& entry) { return entry.hwnd == hWnd; });
+    if (mirror == m_mirrors.end()) {
+        return DefWindowProc(hWnd, msg, wParam, lParam);
+    }
+    switch (msg) {
+        case WM_APP_APPBAR:
+            if (wParam == ABN_POSCHANGED) {
+                SetMirrorAppBar(*mirror, mirror->reserved);
+            }
+            return 0;
+
+        case WM_MOUSEACTIVATE:
+            return MA_NOACTIVATE;
+
+        case WM_LBUTTONDOWN:
+        case WM_RBUTTONDOWN:
+        case WM_MBUTTONDOWN:
+        case WM_LBUTTONDBLCLK:
+        case WM_MOUSEWHEEL:
+        case WM_MOUSEHWHEEL: {
+            const bool wheel = msg == WM_MOUSEWHEEL || msg == WM_MOUSEHWHEEL;
+            POINT pt{(short)LOWORD(lParam), (short)HIWORD(lParam)};
+            if (wheel) {
+                pt.x -= mirror->rect.left;
+                pt.y -= mirror->rect.top;
+            }
+            // Only on the items (between them, it's the bar's background).
+            if (pt.x < 0 || pt.x >= (int)mirror->columns.size() ||
+                mirror->columns[pt.x] < 0) {
+                return 0;
+            }
+            const HMONITOR monitor = mirror->monitor;
+            // (The copies may change below: `mirror` isn't used again.)
+            VisitMonitor(monitor);
+            // Laid out the same way there, the island has the item under
+            // the mouse at the same place.
+            SendMessage(m_hwnd, msg, wParam,
+                        wheel ? lParam : MAKELPARAM(pt.x, pt.y));
+            return 0;
+        }
+
+        case WM_LBUTTONUP:
+        case WM_RBUTTONUP:
+        case WM_MBUTTONUP:
+            // The press was passed on: so is the release, if it comes here.
+            if (mirror->monitor == m_monitorHandle) {
+                SendMessage(m_hwnd, msg, wParam, lParam);
+            }
+            return 0;
+    }
+    return DefWindowProc(hWnd, msg, wParam, lParam);
 }
 
 // Like on macOS: "sex 3 out 23:59:12", with seconds when the taskbar clock
@@ -32729,42 +33196,25 @@ void Island::Render(bool force) {
     // opacity).
     target->CreateSolidColorBrush(Bg(1), brush.put());
 
+    if (m_bar) {
+        ComputeBarZones();
+    }
     if (m_bar && g_settings.islandBarPills) {
         // Only behind the items, the rest of the bar left clear (and the
         // mouse going through it to the windows below): a rounded piece for
-        // each end, and one for the clock alone in the middle.
-        D2D1_RECT_F zones[3]{};
-        bool used[3]{};
-        const bool clockAlone = m_barSpread && g_settings.islandClockCenter;
-        for (const auto& slot : m_slots) {
-            if (slot.group < 0 || slot.rect.right - slot.rect.left < 0.5f) {
-                continue;
-            }
-            const auto group = (PillGroup)slot.group;
-            const int zone = !m_barSpread                             ? 2
-                             : clockAlone && group == PillGroup::Clock ? 1
-                             : BarGroupOnLeft(group)                   ? 0
-                                                                       : 2;
-            if (!used[zone]) {
-                zones[zone] = slot.rect;
-                used[zone] = true;
-            } else {
-                zones[zone].left = std::min(zones[zone].left, slot.rect.left);
-                zones[zone].right = std::max(zones[zone].right, slot.rect.right);
-            }
-        }
+        // each group (see ComputeBarZones).
         const float inset = std::round(3 * scale);
         const float side = std::round(kIslandPadding * scale);
         const float top = m_pill.top + inset;
         const float bottom = m_pill.bottom - inset;
+        const float radius = (bottom - top) / 2;
         for (int i = 0; i < 3; i++) {
-            if (!used[i]) {
+            if (!m_barZoneUsed[i]) {
                 continue;
             }
-            const float radius = (bottom - top) / 2;
             target->FillRoundedRectangle(
-                {{std::max(m_pill.left, zones[i].left - side), top,
-                  std::min(m_pill.right, zones[i].right + side), bottom},
+                {{std::max(m_pill.left, m_barZones[i].left - side), top,
+                  std::min(m_pill.right, m_barZones[i].right + side), bottom},
                  radius,
                  radius},
                 brush.get());
@@ -33902,6 +34352,7 @@ void Island::Render(bool force) {
                               : AppearFade())) {
         m_drawnKey.clear();
     }
+    ComposeMirrors();
     PublishTrayPlaces();
 }
 
@@ -34507,6 +34958,8 @@ void Island::Tick() {
     UpdateWindowsQuiet(true);
     // On the monitor it should be on (another one chosen, unplugged...).
     CheckMonitor();
+    // The bar on the other monitors, as they come and go.
+    SyncMirrors();
     // Not over a full-screen app (a game or a video).
     const bool show = !IsFullscreenAppOn(CurrentMonitor());
     if (show != m_visible) {
@@ -34527,6 +34980,11 @@ void Island::Tick() {
         StartAnimating();
     }
     if (!show) {
+        // Its copies on the other monitors keep their clock going.
+        if (!m_mirrors.empty()) {
+            UpdateClock();
+            Render();
+        }
         return;
     }
     if (++m_ticks >= kIslandStatusTicks) {
@@ -37248,6 +37706,7 @@ void LoadSettings() {
     g_settings.showIsland = Wh_GetIntSetting(L"showIsland") != 0;
     g_settings.islandBarSpread = Wh_GetIntSetting(L"barSpread") != 0;
     g_settings.islandBarPills = Wh_GetIntSetting(L"barPills") != 0;
+    g_settings.islandBarAllMonitors = Wh_GetIntSetting(L"barAllMonitors") != 0;
     // The island's own options, chosen in it (see kIslandPrefs).
     g_settings.islandBar = Wh_GetIntValue(L"islandBar", 0) != 0;
     g_settings.islandTray = Wh_GetIntValue(L"islandTray", 1) != 0;
