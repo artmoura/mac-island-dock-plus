@@ -812,6 +812,21 @@ apps, então o resto da parte de baixo da tela continua clicável), ou como ela
   $name:pt-BR: Fundo da barra só atrás dos itens
   $description: Only with the island as a full-width bar. A rounded piece behind each group of items (each end, and the clock when it's alone in the middle), and the rest of the bar clear, with the mouse going through it to the windows below. Off, the bar is filled from edge to edge
   $description:pt-BR: Só com a ilha como barra de largura total. Uma peça arredondada atrás de cada grupo de itens (cada ponta, e o relógio quando ele fica sozinho no meio), e o resto da barra transparente, com o mouse passando por ela para as janelas de baixo. Desligado, a barra é preenchida de ponta a ponta
+- appName: true
+  $name: The app in front's name on the bar, like macOS
+  $name:pt-BR: O nome do app em foco na barra, como no macOS
+  $description: Only with the island as a full-width bar. In bold at the left end (next to the power button); clicking it shows a menu to minimize, maximize, close the window or quit the app
+  $description:pt-BR: Só com a ilha como barra de largura total. Em negrito na ponta esquerda (ao lado do botão de desligar); clicar nele mostra um menu para minimizar, maximizar, fechar a janela ou encerrar o app
+- macIcons: true
+  $name: macOS-style status icons
+  $name:pt-BR: Ícones de status no estilo do macOS
+  $description: Wi-Fi, volume and battery drawn like the macOS menu bar's (Wi-Fi as arcs, a speaker with waves, a sideways battery with a bolt while charging). Off, the Windows icons
+  $description:pt-BR: Wi-Fi, volume e bateria desenhados como na barra do macOS (Wi-Fi em arcos, um alto-falante com ondas, uma bateria deitada com um raio carregando). Desligado, os ícones do Windows
+- barFont: ""
+  $name: Font of the island's text
+  $name:pt-BR: Fonte dos textos da ilha
+  $description: The name of an installed font for the clock and the app's name, such as Inter (free, close to the macOS font). Empty for Segoe UI Variable, the Windows one
+  $description:pt-BR: O nome de uma fonte instalada para o relógio e o nome do app, como a Inter (gratuita, parecida com a do macOS). Vazio para a Segoe UI Variable, a do Windows
 - trayListIcons: 12
   $name: Tray icons shown before the list scrolls
   $name:pt-BR: Ícones da bandeja mostrados antes de a lista rolar
@@ -1107,6 +1122,10 @@ struct {
     bool islandBarPills;
     // The bar on the other monitors too (see BarMirror).
     bool islandBarAllMonitors;
+    // The app in front's name on the bar (see PillGroup::AppName).
+    bool islandAppName;
+    // Wi-Fi, volume and battery drawn like macOS's (see DrawMacIcon).
+    bool islandMacIcons;
     // Panels opening out of the pill as wide as it, when it's wider than
     // them (otherwise they drop out of the clicked item, at their own width).
     bool islandPanelsFollow;
@@ -6542,6 +6561,8 @@ enum class IslandItem {
     // The bubble with a gear under the island (a right click on it): the
     // island's settings.
     SettingsBubble,
+    // The app in front's name, on the bar (see PillGroup::AppName).
+    AppName,
 };
 
 struct IslandSlot {
@@ -10770,6 +10791,12 @@ enum class IslandPref {
     Updates,
     Animations,
     FollowMouse,
+    // Also in Windhawk's settings (see LoadDualSwitch).
+    BarSpread,
+    BarPills,
+    BarAllMonitors,
+    AppName,
+    MacIcons,
 };
 
 struct IslandPrefInfo {
@@ -10857,6 +10884,20 @@ const IslandPrefInfo kIslandPrefs[] = {
     {IslandPref::Animations, nullptr, 0xE945, L"Animations", L"Animações"},
     {IslandPref::FollowMouse, L"islandFollowMouse", 0xE962,
      L"On the monitor with the mouse", L"No monitor onde está o mouse"},
+    // Kept with Windhawk's (see SaveDualSwitch).
+    {IslandPref::BarSpread, nullptr, 0xE740,
+     L"Bar: items at both ends, like macOS",
+     L"Barra: itens nas duas pontas, como no macOS"},
+    {IslandPref::BarPills, nullptr, 0xE790,
+     L"Bar: background only behind the items",
+     L"Barra: fundo só atrás dos itens"},
+    {IslandPref::BarAllMonitors, nullptr, 0xE7F4,
+     L"Bar: on every monitor", L"Barra: em todos os monitores"},
+    {IslandPref::AppName, nullptr, 0xE71D,
+     L"Bar: the app in front's name", L"Barra: nome do app em foco"},
+    {IslandPref::MacIcons, nullptr, 0xE734,
+     L"macOS-style Wi-Fi, volume and battery icons",
+     L"Ícones de Wi-Fi, volume e bateria estilo macOS"},
 };
 
 // The groups of items on the pill, which can be put in another order in the
@@ -10879,6 +10920,9 @@ enum class PillGroup {
     Shortcuts,
     Weather,
     Updates,
+    // The app in front's name, on the bar only (kept last: the order is
+    // saved by these numbers).
+    AppName,
     Count
 };
 constexpr int kPillGroups = (int)PillGroup::Count;
@@ -10907,6 +10951,7 @@ const PillGroupInfo kPillGroupInfo[kPillGroups] = {
     {0xE765, L"Keyboard shortcuts", L"Atalhos do teclado"},
     {0xE753, L"Weather", L"Clima"},
     {0xE895, L"Updates", L"Atualizações"},
+    {0xE71D, L"App in front", L"App em foco"},
 };
 
 // Whether any of the processor, memory and video memory use is shown (the
@@ -10971,6 +11016,8 @@ int PillGroupPref(PillGroup group) {
             return (int)IslandPref::Weather;
         case PillGroup::Updates:
             return (int)IslandPref::Updates;
+        case PillGroup::AppName:
+            return (int)IslandPref::AppName;
         default:
             return -1;
     }
@@ -11003,7 +11050,11 @@ void LoadPillOrder() {
             continue;
         }
         auto at = g_pillOrder.begin();
-        for (int j = i - 1; j >= 0; j--) {
+        // The app's name goes after the power button, like the app's menu
+        // after the Apple menu.
+        const int after = group == PillGroup::AppName ? (int)PillGroup::Power
+                                                      : i - 1;
+        for (int j = after; j >= 0; j--) {
             auto it =
                 std::find(g_pillOrder.begin(), g_pillOrder.end(), (PillGroup)j);
             if (it != g_pillOrder.end()) {
@@ -11163,6 +11214,32 @@ void LoadTrayListSetting() {
     }
     g_trayListIcons = std::clamp(value, kTrayListMin, kTrayListMax);
 }
+
+// A switch both in Windhawk's settings and in the island's: switched in the
+// island, that holds until Windhawk's is changed (like the tray list above).
+// Kept as "<setting>Island", with Windhawk's value then as "<setting>Base".
+bool LoadDualSwitch(PCWSTR setting) {
+    const int windhawk = Wh_GetIntSetting(setting) != 0;
+    const std::wstring island = std::wstring(setting) + L"Island";
+    const std::wstring base = std::wstring(setting) + L"Base";
+    if (const int value = Wh_GetIntValue(island.c_str(), -1); value >= 0) {
+        if (Wh_GetIntValue(base.c_str(), -1) == windhawk) {
+            return value != 0;
+        }
+        Wh_DeleteValue(island.c_str());
+        Wh_DeleteValue(base.c_str());
+    }
+    return windhawk != 0;
+}
+
+void SaveDualSwitch(PCWSTR setting, bool on) {
+    Wh_SetIntValue((std::wstring(setting) + L"Island").c_str(), on ? 1 : 0);
+    Wh_SetIntValue((std::wstring(setting) + L"Base").c_str(),
+                   Wh_GetIntSetting(setting) != 0);
+}
+
+// The font of the island's text (see UpdateFormats), or empty for Windows'.
+std::wstring g_barFont;
 
 void SetTrayListIcons(int icons, bool keep);
 
@@ -12158,7 +12235,13 @@ class ControlPanel : public Panel {
                  pref == IslandPref::WebPictures) &&
                 !GetIslandPref(IslandPref::Banner)) ||
                (pref == IslandPref::HideWindowsBanners &&
-                GetIslandPref(IslandPref::OwnNotifications));
+                GetIslandPref(IslandPref::OwnNotifications)) ||
+               // Only for the full-width bar.
+               ((pref == IslandPref::BarSpread ||
+                 pref == IslandPref::BarPills ||
+                 pref == IslandPref::BarAllMonitors ||
+                 pref == IslandPref::AppName) &&
+                !GetIslandPref(IslandPref::Bar));
     }
     void DrawShortcut(ID2D1RenderTarget* target,
                       ID2D1SolidColorBrush* brush,
@@ -19951,6 +20034,25 @@ class Island {
     void SetMirrorAppBar(BarMirror& mirror, int height);
     void ComposeMirrors();
     void VisitMonitor(HMONITOR monitor);
+    // The app in front, its name on the bar (see PillGroup::AppName), and
+    // its menu (minimize, maximize, close, quit).
+    std::wstring m_appName;
+    HWND m_appWindow = nullptr;
+    winrt::com_ptr<IDWriteTextFormat> m_appNameFormat;
+    std::wstring m_appNameMeasured;
+    float m_appNameWidth = 0;
+    void UpdateAppName(HWND window);
+    void ShowAppMenu();
+    // The font the text formats were made with (see g_barFont).
+    std::wstring m_formatFont;
+    // Wi-Fi, volume and battery drawn like macOS's (see islandMacIcons).
+    winrt::com_ptr<ID2D1StrokeStyle> m_roundStroke;
+    bool DrawMacIcon(ID2D1RenderTarget* target,
+                     ID2D1SolidColorBrush* brush,
+                     IslandItem item,
+                     const std::wstring& glyph,
+                     D2D1_POINT_2F center,
+                     float alpha);
     winrt::com_ptr<ID2D1Factory> m_d2d;
     winrt::com_ptr<IDWriteFactory> m_dwrite;
     LayeredCanvas m_canvas;
@@ -22052,7 +22154,12 @@ void ControlPanel::LayoutSettings() {
         static const SettingSpec kSpecs[] = {
             {(int)SettingKind::Label, 0, kSectionLook},
             {(int)SettingKind::Style, 0, kSectionLook},
+            {(int)SettingKind::Pref, (int)IslandPref::BarSpread, kSectionLook},
+            {(int)SettingKind::Pref, (int)IslandPref::BarPills, kSectionLook},
+            {(int)SettingKind::Pref, (int)IslandPref::BarAllMonitors,
+             kSectionLook},
             {(int)SettingKind::Theme, 0, kSectionLook},
+            {(int)SettingKind::Pref, (int)IslandPref::MacIcons, kSectionLook},
             {(int)SettingKind::Size, 0, kSectionLook},
             {(int)SettingKind::Pref, (int)IslandPref::PanelsFollow,
              kSectionLook},
@@ -22075,6 +22182,7 @@ void ControlPanel::LayoutSettings() {
             {(int)SettingKind::Pref, (int)IslandPref::Battery, kSectionPill},
             {(int)SettingKind::Pref, (int)IslandPref::Bell, kSectionPill},
             {(int)SettingKind::Pref, (int)IslandPref::Power, kSectionPill},
+            {(int)SettingKind::Pref, (int)IslandPref::AppName, kSectionPill},
             {(int)SettingKind::Pref, (int)IslandPref::ThemeButton,
              kSectionPill},
             {(int)SettingKind::Pref, (int)IslandPref::Microphone,
@@ -29311,6 +29419,16 @@ int GetIslandPref(IslandPref pref) {
             return g_animationChoice.on;
         case IslandPref::FollowMouse:
             return g_settings.islandFollowMouse;
+        case IslandPref::BarSpread:
+            return g_settings.islandBarSpread;
+        case IslandPref::BarPills:
+            return g_settings.islandBarPills;
+        case IslandPref::BarAllMonitors:
+            return g_settings.islandBarAllMonitors;
+        case IslandPref::AppName:
+            return g_settings.islandAppName;
+        case IslandPref::MacIcons:
+            return g_settings.islandMacIcons;
     }
     return 0;
 }
@@ -29523,6 +29641,27 @@ void SetIslandPref(IslandPref pref, int value) {
             break;
         case IslandPref::Updates:
             g_settings.islandUpdates = on;
+            break;
+        case IslandPref::BarSpread:
+            g_settings.islandBarSpread = on;
+            SaveDualSwitch(L"barSpread", on);
+            break;
+        case IslandPref::BarPills:
+            g_settings.islandBarPills = on;
+            SaveDualSwitch(L"barPills", on);
+            break;
+        case IslandPref::BarAllMonitors:
+            // (The copies come or go on the next tick, see SyncMirrors.)
+            g_settings.islandBarAllMonitors = on;
+            SaveDualSwitch(L"barAllMonitors", on);
+            break;
+        case IslandPref::AppName:
+            g_settings.islandAppName = on;
+            SaveDualSwitch(L"appName", on);
+            break;
+        case IslandPref::MacIcons:
+            g_settings.islandMacIcons = on;
+            SaveDualSwitch(L"macIcons", on);
             break;
     }
     if (g_island) {
@@ -30125,6 +30264,7 @@ void Island::OnForegroundChanged() {
     if (!foreground) {
         return;
     }
+    UpdateAppName(foreground);
     DWORD processId = 0;
     GetWindowThreadProcessId(foreground, &processId);
     if (processId == GetCurrentProcessId()) {
@@ -30188,6 +30328,10 @@ void Island::FinishDrag() {
 bool Island::GroupWanted(PillGroup group) const {
     if (!OnlineGroupAllowed(group)) {
         return false;
+    }
+    // On the bar only (the pill would grow with every app).
+    if (group == PillGroup::AppName) {
+        return m_bar && g_settings.islandAppName && !m_appName.empty();
     }
     if (group == PillGroup::Microphone && m_microphoneGlyph.empty()) {
         return false;
@@ -30559,6 +30703,7 @@ bool Island::Create() {
         m_groupShown[i] = GroupWanted((PillGroup)i) ? 1 : 0;
     }
     m_placeApp = WindowAppKey(GetForegroundWindow());
+    UpdateAppName(GetForegroundWindow());
     m_placeX = m_bar ? 0.5 : CurrentPlace().x;
     m_placeY = m_bar ? 0 : CurrentPlace().y;
     m_minimized = !m_bar && m_placeY < 0.001 &&
@@ -31174,6 +31319,420 @@ void Island::VisitMonitor(HMONITOR monitor) {
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
 
+////////////////////////////////////////////////////////////////////////////////
+// The app in front's name on the bar (see PillGroup::AppName).
+
+// The name of the app a window is of, like the macOS menu bar shows it: its
+// program's description ("Google Chrome"), the window's title for the Store
+// apps' frame, or its file name. "Desktop" for the desktop.
+std::wstring AppNameOfWindow(HWND window) {
+    WCHAR className[64] = L"";
+    GetClassName(window, className, ARRAYSIZE(className));
+    if (_wcsicmp(className, L"Progman") == 0 ||
+        _wcsicmp(className, L"WorkerW") == 0) {
+        return Tr(L"Desktop", L"Área de trabalho");
+    }
+    DWORD processId = 0;
+    GetWindowThreadProcessId(window, &processId);
+    std::wstring path;
+    if (HANDLE process =
+            OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId)) {
+        WCHAR buffer[MAX_PATH];
+        DWORD size = ARRAYSIZE(buffer);
+        if (QueryFullProcessImageName(process, 0, buffer, &size)) {
+            path.assign(buffer, size);
+        }
+        CloseHandle(process);
+    }
+    if (path.empty()) {
+        return {};
+    }
+    const std::wstring file = PathFindFileName(path.c_str());
+    if (_wcsicmp(file.c_str(), L"ApplicationFrameHost.exe") == 0) {
+        WCHAR title[256] = L"";
+        GetWindowText(window, title, ARRAYSIZE(title));
+        return title;
+    }
+    DWORD handle = 0;
+    if (const DWORD infoSize = GetFileVersionInfoSize(path.c_str(), &handle)) {
+        std::vector<BYTE> info(infoSize);
+        struct Translation {
+            WORD language;
+            WORD codePage;
+        }* translations = nullptr;
+        UINT translationsSize = 0;
+        if (GetFileVersionInfo(path.c_str(), 0, infoSize, info.data()) &&
+            VerQueryValue(info.data(), L"\\VarFileInfo\\Translation",
+                          (void**)&translations, &translationsSize) &&
+            translationsSize >= sizeof(Translation)) {
+            WCHAR query[64];
+            swprintf_s(query, L"\\StringFileInfo\\%04x%04x\\FileDescription",
+                       translations[0].language, translations[0].codePage);
+            PCWSTR description = nullptr;
+            UINT length = 0;
+            if (VerQueryValue(info.data(), query, (void**)&description,
+                              &length) &&
+                description && length > 1) {
+                std::wstring name = description;
+                while (!name.empty() && name.back() == L' ') {
+                    name.pop_back();
+                }
+                if (!name.empty()) {
+                    return name;
+                }
+            }
+        }
+    }
+    std::wstring name = file;
+    if (name.size() > 4 &&
+        _wcsicmp(name.c_str() + name.size() - 4, L".exe") == 0) {
+        name.resize(name.size() - 4);
+    }
+    return name;
+}
+
+// The app in front changed: its name on the bar. The island's own windows,
+// the taskbar (the dock) and the shell's flyouts keep the one before.
+void Island::UpdateAppName(HWND window) {
+    window = window ? GetAncestor(window, GA_ROOT) : nullptr;
+    if (!window) {
+        return;
+    }
+    DWORD processId = 0;
+    GetWindowThreadProcessId(window, &processId);
+    if (processId == GetCurrentProcessId()) {
+        return;
+    }
+    WCHAR className[64] = L"";
+    GetClassName(window, className, ARRAYSIZE(className));
+    if (_wcsicmp(className, L"Shell_TrayWnd") == 0 ||
+        _wcsicmp(className, L"Shell_SecondaryTrayWnd") == 0 ||
+        _wcsicmp(className, L"Windows.UI.Core.CoreWindow") == 0 ||
+        _wcsicmp(className, L"XamlExplorerHostIslandWindow") == 0 ||
+        IsShellFlyout(window)) {
+        return;
+    }
+    std::wstring name = AppNameOfWindow(window);
+    if (name.empty()) {
+        return;
+    }
+    m_appWindow = window;
+    if (name != m_appName) {
+        m_appName = std::move(name);
+        if (m_hwnd) {
+            Relayout();
+        }
+    }
+}
+
+// Asks each main window of the process `param` to close.
+BOOL CALLBACK CloseAppWindowProc(HWND hWnd, LPARAM param) {
+    DWORD processId = 0;
+    GetWindowThreadProcessId(hWnd, &processId);
+    if (processId == (DWORD)param && IsWindowVisible(hWnd) &&
+        !GetWindow(hWnd, GW_OWNER)) {
+        PostMessage(hWnd, WM_SYSCOMMAND, SC_CLOSE, 0);
+    }
+    return TRUE;
+}
+
+// Clicking the app's name: its window's menu, under it, like the app's menu
+// on macOS.
+void Island::ShowAppMenu() {
+    HWND window = m_appWindow;
+    if (!window || !IsWindow(window)) {
+        return;
+    }
+    POINT at{0, 0};
+    for (const auto& slot : m_slots) {
+        if (slot.item == IslandItem::AppName) {
+            at = {(LONG)slot.rect.left, (LONG)slot.rect.bottom};
+        }
+    }
+    ClientToScreen(m_hwnd, &at);
+    const bool maximized = IsZoomed(window);
+    const std::wstring quit =
+        std::wstring(Tr(L"Quit ", L"Encerrar ")) + m_appName;
+    HMENU menu = CreatePopupMenu();
+    AppendMenu(menu, MF_STRING, 1, Tr(L"Minimize", L"Minimizar"));
+    AppendMenu(menu, MF_STRING, 2,
+               maximized ? Tr(L"Restore", L"Restaurar")
+                         : Tr(L"Maximize", L"Maximizar"));
+    AppendMenu(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenu(menu, MF_STRING, 3, Tr(L"Close window", L"Fechar janela"));
+    AppendMenu(menu, MF_STRING, 4, quit.c_str());
+    // (The menu needs the island in front to close when clicked away.)
+    SetForegroundWindow(m_hwnd);
+    const int command = TrackPopupMenu(
+        menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTALIGN | TPM_TOPALIGN,
+        at.x, at.y, 0, m_hwnd, nullptr);
+    DestroyMenu(menu);
+    switch (command) {
+        case 1:
+            PostMessage(window, WM_SYSCOMMAND, SC_MINIMIZE, 0);
+            break;
+        case 2:
+            PostMessage(window, WM_SYSCOMMAND,
+                        maximized ? SC_RESTORE : SC_MAXIMIZE, 0);
+            SetForegroundWindow(window);
+            break;
+        case 3:
+            PostMessage(window, WM_SYSCOMMAND, SC_CLOSE, 0);
+            break;
+        case 4: {
+            // Every window of the app is asked to close, like quitting it
+            // (it can still ask to save first).
+            DWORD processId = 0;
+            GetWindowThreadProcessId(window, &processId);
+            EnumWindows(CloseAppWindowProc, (LPARAM)processId);
+            break;
+        }
+        default:
+            // Nothing chosen: the app is in front again.
+            SetForegroundWindow(window);
+            break;
+    }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// macOS-style status icons (see islandMacIcons).
+
+// Wi-Fi, volume and battery like the macOS menu bar draws them, centered on
+// `center` (under the transform set by the caller), from the Windows glyph
+// chosen for them. False for what stays a glyph (the cable, no network).
+bool Island::DrawMacIcon(ID2D1RenderTarget* target,
+                         ID2D1SolidColorBrush* brush,
+                         IslandItem item,
+                         const std::wstring& glyph,
+                         D2D1_POINT_2F center,
+                         float alpha) {
+    if (glyph.empty() || !m_d2d) {
+        return false;
+    }
+    const float s = m_scale;
+    if (!m_roundStroke) {
+        m_d2d->CreateStrokeStyle(
+            D2D1::StrokeStyleProperties(D2D1_CAP_STYLE_ROUND,
+                                        D2D1_CAP_STYLE_ROUND,
+                                        D2D1_CAP_STYLE_ROUND,
+                                        D2D1_LINE_JOIN_ROUND),
+            nullptr, 0, m_roundStroke.put());
+    }
+    // An arc of `radius` around `at`, `half` radians to each side of
+    // `angle` (0 is up, pi/2 is right).
+    auto arc = [&](D2D1_POINT_2F at, float radius, float angle, float half,
+                   float width, float a) {
+        winrt::com_ptr<ID2D1PathGeometry> path;
+        winrt::com_ptr<ID2D1GeometrySink> sink;
+        if (a <= 0.004f || FAILED(m_d2d->CreatePathGeometry(path.put())) ||
+            FAILED(path->Open(sink.put()))) {
+            return;
+        }
+        auto point = [&](float t) {
+            return D2D1::Point2F(at.x + radius * std::sin(t),
+                                 at.y - radius * std::cos(t));
+        };
+        sink->BeginFigure(point(angle - half), D2D1_FIGURE_BEGIN_HOLLOW);
+        sink->AddArc({point(angle + half),
+                      {radius, radius},
+                      0,
+                      D2D1_SWEEP_DIRECTION_CLOCKWISE,
+                      D2D1_ARC_SIZE_SMALL});
+        sink->EndFigure(D2D1_FIGURE_END_OPEN);
+        sink->Close();
+        brush->SetColor(Fg(a));
+        target->DrawGeometry(path.get(), brush, width, m_roundStroke.get());
+    };
+    // A closed shape through `points` (in s units from `center`).
+    auto shape = [&](std::initializer_list<D2D1_POINT_2F> points) {
+        winrt::com_ptr<ID2D1PathGeometry> path;
+        winrt::com_ptr<ID2D1GeometrySink> sink;
+        if (FAILED(m_d2d->CreatePathGeometry(path.put())) ||
+            FAILED(path->Open(sink.put()))) {
+            return path;
+        }
+        bool first = true;
+        for (const auto& p : points) {
+            const D2D1_POINT_2F at{center.x + p.x * s, center.y + p.y * s};
+            if (first) {
+                sink->BeginFigure(at, D2D1_FIGURE_BEGIN_FILLED);
+                first = false;
+            } else {
+                sink->AddLine(at);
+            }
+        }
+        sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+        sink->Close();
+        return path;
+    };
+    auto line = [&](float x1, float y1, float x2, float y2, float width,
+                    float a) {
+        brush->SetColor(Fg(a));
+        target->DrawLine({center.x + x1 * s, center.y + y1 * s},
+                         {center.x + x2 * s, center.y + y2 * s}, brush,
+                         width * s, m_roundStroke.get());
+    };
+    const float lit = 0.95f * alpha;
+    const float dim = 0.3f * alpha;
+    const WCHAR g = glyph[0];
+    switch (item) {
+        case IslandItem::Network: {
+            // A dot and two arcs, lit by the signal; connecting, they light
+            // one after another; without internet, faint with a "!".
+            int level = -1;
+            bool warning = false;
+            for (int i = 0; i < 4; i++) {
+                if (g == kGlyphWifi[i]) {
+                    level = i;
+                }
+                if (g == kGlyphWifiWarning[i]) {
+                    level = i;
+                    warning = true;
+                }
+            }
+            if (level < 0) {
+                return false;
+            }
+            if (glyph.size() > 1 && glyph[1] == L'~') {
+                level = (int)(NowSeconds() / 0.32) % 4;
+            }
+            const D2D1_POINT_2F base{center.x - (warning ? 2.5f * s : 0),
+                                     center.y + 5.5f * s};
+            const float width = 1.9f * s;
+            constexpr float kHalf = 0.8f;
+            brush->SetColor(Fg(warning ? dim : lit));
+            target->FillEllipse({{base.x, base.y - 0.7f * s}, 1.6f * s,
+                                 1.6f * s},
+                                brush);
+            arc(base, 5.8f * s, 0, kHalf, width,
+                !warning && level >= 2 ? lit : dim);
+            arc(base, 10.4f * s, 0, kHalf, width,
+                !warning && level >= 3 ? lit : dim);
+            if (warning) {
+                line(7.5f, -4.5f, 7.5f, 1.5f, 1.7f, lit);
+                brush->SetColor(Fg(lit));
+                target->FillEllipse(
+                    {{center.x + 7.5f * s, center.y + 4.6f * s}, 1.0f * s,
+                     1.0f * s},
+                    brush);
+            }
+            return true;
+        }
+        case IslandItem::Volume: {
+            // A speaker with up to three waves, or crossed out when muted.
+            int level = -1;
+            for (int i = 0; i < 4; i++) {
+                if (g == kGlyphVolume[i]) {
+                    level = i;
+                }
+            }
+            const bool muted = g == kGlyphMute;
+            if (level < 0 && !muted) {
+                return false;
+            }
+            const float mouth = -1.7f;
+            winrt::com_ptr<ID2D1PathGeometry> speaker =
+                shape({{mouth - 6.0f, -2.4f},
+                       {mouth - 3.2f, -2.4f},
+                       {mouth, -5.6f},
+                       {mouth, 5.6f},
+                       {mouth - 3.2f, 2.4f},
+                       {mouth - 6.0f, 2.4f}});
+            if (speaker) {
+                brush->SetColor(Fg(lit));
+                target->FillGeometry(speaker.get(), brush);
+            }
+            if (muted) {
+                line(mouth + 3.2f, -3.0f, mouth + 9.2f, 3.0f, 1.7f, lit);
+                line(mouth + 9.2f, -3.0f, mouth + 3.2f, 3.0f, 1.7f, lit);
+                return true;
+            }
+            const D2D1_POINT_2F at{center.x + mouth * s, center.y};
+            constexpr float kRight = 1.5707964f;
+            for (int wave = 1; wave <= 3; wave++) {
+                arc(at, (0.2f + 3.1f * wave) * s, kRight, 0.72f, 1.7f * s,
+                    level >= wave ? lit : dim * 0.8f);
+            }
+            return true;
+        }
+        case IslandItem::Battery: {
+            // Lying down, filled as charged (red when low), with a bolt
+            // while charging.
+            int tenth = -1;
+            bool charging = false;
+            if (g == 0xE83F) {
+                tenth = 10;
+            } else if (g == 0xEA93) {
+                tenth = 10;
+                charging = true;
+            } else if (g >= 0xE85A && g <= 0xE85A + 9) {
+                tenth = g - 0xE85A;
+                charging = true;
+            } else if (g >= 0xE850 && g <= 0xE850 + 9) {
+                tenth = g - 0xE850;
+            }
+            if (tenth < 0) {
+                return false;
+            }
+            const float halfWidth = 11.0f * s;
+            const float halfHeight = 5.5f * s;
+            const D2D1_RECT_F body{center.x - halfWidth - 1.2f * s,
+                                   center.y - halfHeight,
+                                   center.x + halfWidth - 1.2f * s,
+                                   center.y + halfHeight};
+            brush->SetColor(Fg(0.45f * alpha));
+            target->DrawRoundedRectangle({body, 3.2f * s, 3.2f * s}, brush,
+                                         1.1f * s);
+            target->FillRoundedRectangle(
+                {{body.right + 1.2f * s, center.y - 2.0f * s,
+                  body.right + 2.6f * s, center.y + 2.0f * s},
+                 0.8f * s,
+                 0.8f * s},
+                brush);
+            const float inset = 2.0f * s;
+            const float full = body.right - body.left - inset * 2;
+            const float charged =
+                std::max(full * tenth / 10.0f, 2.2f * s);
+            if (tenth <= 2 && !charging) {
+                brush->SetColor(D2D1::ColorF(1.0f, 0.27f, 0.23f, lit));
+            } else {
+                brush->SetColor(Fg(lit));
+            }
+            target->FillRoundedRectangle(
+                {{body.left + inset, body.top + inset,
+                  body.left + inset + charged, body.bottom - inset},
+                 1.6f * s,
+                 1.6f * s},
+                brush);
+            if (charging) {
+                winrt::com_ptr<ID2D1PathGeometry> bolt =
+                    shape({{0.0f, -6.6f},
+                           {-4.0f, 0.9f},
+                           {-1.1f, 0.9f},
+                           {-2.4f, 6.6f},
+                           {2.4f, -0.9f},
+                           {-0.5f, -0.9f}});
+                if (bolt) {
+                    const D2D1_MATRIX_3X2_F shift =
+                        D2D1::Matrix3x2F::Translation(-1.2f * s, 0);
+                    D2D1_MATRIX_3X2_F before;
+                    target->GetTransform(&before);
+                    target->SetTransform(shift * before);
+                    brush->SetColor(Bg(alpha));
+                    target->DrawGeometry(bolt.get(), brush, 1.6f * s,
+                                         m_roundStroke.get());
+                    brush->SetColor(Fg(lit));
+                    target->FillGeometry(bolt.get(), brush);
+                    target->SetTransform(before);
+                }
+            }
+            return true;
+        }
+        default:
+            return false;
+    }
+}
+
 LRESULT Island::HandleMirrorMessage(HWND hWnd, UINT msg, WPARAM wParam,
                                     LPARAM lParam) {
     auto mirror = std::find_if(
@@ -31191,6 +31750,20 @@ LRESULT Island::HandleMirrorMessage(HWND hWnd, UINT msg, WPARAM wParam,
 
         case WM_MOUSEACTIVATE:
             return MA_NOACTIVATE;
+
+        case WM_MOUSEMOVE: {
+            // The mouse on an item of the copy: the island comes here, so the
+            // item lights up under it as on the island (not while a panel is
+            // open or a reply is typed elsewhere).
+            const int x = (short)LOWORD(lParam);
+            if (x < 0 || x >= (int)mirror->columns.size() ||
+                mirror->columns[x] < 0 || AnyPanelOpen() || m_bannerTyping) {
+                return 0;
+            }
+            VisitMonitor(mirror->monitor);
+            SendMessage(m_hwnd, msg, wParam, lParam);
+            return 0;
+        }
 
         case WM_LBUTTONDOWN:
         case WM_RBUTTONDOWN:
@@ -31591,7 +32164,11 @@ void Island::DrawNetwork(ID2D1RenderTarget* target,
         }
         const float scale = std::max(size * pressed, 0.0f);
         target->SetTransform(D2D1::Matrix3x2F::Scale(scale, scale, center));
-        if (text.size() > 1 && text[1] == L'~') {
+        if (g_settings.islandMacIcons &&
+            DrawMacIcon(target, brush, IslandItem::Network, text, center,
+                        alpha)) {
+            // (Drawn like macOS's.)
+        } else if (text.size() > 1 && text[1] == L'~') {
             const double now = NowSeconds();
             if (text[0] == kGlyphEthernet) {
                 // The cable, pulsing.
@@ -31691,13 +32268,35 @@ void Island::UpdateStatus() {
 
 void Island::UpdateFormats(float scale) {
     if (scale == m_scale && m_iconFormat && m_smallIconFormat &&
-        m_textFormat) {
+        m_textFormat && m_formatFont == g_barFont) {
         return;
     }
     m_scale = scale;
+    m_formatFont = g_barFont;
+    // (A font that isn't installed falls back to another by itself.)
+    const std::wstring textFont =
+        g_barFont.empty() ? L"Segoe UI Variable Text" : g_barFont;
     m_iconFormat = nullptr;
     m_smallIconFormat = nullptr;
     m_textFormat = nullptr;
+    m_appNameFormat = nullptr;
+    m_appNameMeasured.clear();
+    // The app's name: bold, from its start, ending with "..." when too long.
+    if (SUCCEEDED(m_dwrite->CreateTextFormat(
+            textFont.c_str(), nullptr, DWRITE_FONT_WEIGHT_BOLD,
+            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+            kIslandTextSize * scale, L"", m_appNameFormat.put()))) {
+        m_appNameFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+        m_appNameFormat->SetParagraphAlignment(
+            DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        m_appNameFormat->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        const DWRITE_TRIMMING trimming{DWRITE_TRIMMING_GRANULARITY_CHARACTER,
+                                       0, 0};
+        winrt::com_ptr<IDWriteInlineObject> ellipsis;
+        m_dwrite->CreateEllipsisTrimmingSign(m_appNameFormat.get(),
+                                             ellipsis.put());
+        m_appNameFormat->SetTrimming(&trimming, ellipsis.get());
+    }
     m_dwrite->CreateTextFormat(L"Segoe Fluent Icons", nullptr,
                                DWRITE_FONT_WEIGHT_NORMAL,
                                DWRITE_FONT_STYLE_NORMAL,
@@ -31710,7 +32309,7 @@ void Island::UpdateFormats(float scale) {
                                DWRITE_FONT_STRETCH_NORMAL,
                                kIslandSmallIconSize * scale, L"",
                                m_smallIconFormat.put());
-    m_dwrite->CreateTextFormat(L"Segoe UI Variable Text", nullptr,
+    m_dwrite->CreateTextFormat(textFont.c_str(), nullptr,
                                DWRITE_FONT_WEIGHT_SEMI_BOLD,
                                DWRITE_FONT_STYLE_NORMAL,
                                DWRITE_FONT_STRETCH_NORMAL,
@@ -31788,6 +32387,7 @@ void Island::UpdateFormats(float scale) {
 bool BarGroupOnLeft(PillGroup group) {
     switch (group) {
         case PillGroup::Power:
+        case PillGroup::AppName:
         case PillGroup::Apps:
         case PillGroup::Media:
         case PillGroup::Weather:
@@ -32295,6 +32895,35 @@ void Island::Layout() {
                                    8});
                 x += iconSlot + spacing;
                 break;
+            case PillGroup::AppName: {
+                // As wide as the name (measured once per name), up to a
+                // limit where it ends with "...".
+                if (m_appName.empty() || !m_appNameFormat) {
+                    break;
+                }
+                if (m_appNameMeasured != m_appName) {
+                    m_appNameMeasured = m_appName;
+                    m_appNameWidth = 0;
+                    winrt::com_ptr<IDWriteTextLayout> layout;
+                    if (SUCCEEDED(m_dwrite->CreateTextLayout(
+                            m_appName.c_str(), (UINT32)m_appName.size(),
+                            m_appNameFormat.get(), 10000, height,
+                            layout.put()))) {
+                        DWRITE_TEXT_METRICS metrics{};
+                        layout->GetMetrics(&metrics);
+                        m_appNameWidth = std::ceil(metrics.width);
+                    }
+                }
+                const float width =
+                    std::min(m_appNameWidth + std::round(8 * scale),
+                             std::round(240 * scale));
+                m_slots.push_back({IslandItem::AppName,
+                                   {x, 0, x + width, height},
+                                   m_appName,
+                                   10});
+                x += width + spacing;
+                break;
+            }
             case PillGroup::Count:
                 break;
         }
@@ -33777,6 +34406,27 @@ void Island::Render(bool force) {
                 }
                 continue;
             }
+            if (slot.font == 10) {
+                // The app in front's name, in bold (see PillGroup::AppName).
+                if (m_appNameFormat) {
+                    float pressed = 1;
+                    if (m_press.target == (int)IslandItem::AppName) {
+                        pressed -= 0.35f * (float)std::clamp(
+                                               m_press.Amount(NowSeconds()),
+                                               0.0, 1.0);
+                    }
+                    brush->SetColor(
+                        Fg(0.95f * pressed * contentOpacity *
+                           std::clamp(slot.scale, 0.0f, 1.0f)));
+                    target->DrawText(
+                        slot.text.c_str(), (UINT32)slot.text.size(),
+                        m_appNameFormat.get(),
+                        {slot.rect.left + std::round(4 * scale), slot.rect.top,
+                         slot.rect.right, slot.rect.bottom},
+                        brush.get());
+                }
+                continue;
+            }
             if (slot.font == 6) {
                 // What's playing: the note turning into the cover, and the
                 // title next to it.
@@ -34202,11 +34852,17 @@ void Island::Render(bool force) {
                         beforeScale, beforeScale, middle));
                     brush->SetColor(
                         Fg(0.95f * contentOpacity * glyphOpacity * t * t));
-                    target->DrawText(swap.from.c_str(),
-                                     (UINT32)swap.from.size(), format,
-                                     {middle.x - full / 2, slot.rect.top,
-                                      middle.x + full / 2, slot.rect.bottom},
-                                     brush.get());
+                    if (!g_settings.islandMacIcons ||
+                        !DrawMacIcon(target, brush.get(), slot.item, swap.from,
+                                     middle,
+                                     contentOpacity * glyphOpacity * t * t)) {
+                        target->DrawText(
+                            swap.from.c_str(), (UINT32)swap.from.size(),
+                            format,
+                            {middle.x - full / 2, slot.rect.top,
+                             middle.x + full / 2, slot.rect.bottom},
+                            brush.get());
+                    }
                     target->SetTransform(D2D1::Matrix3x2F::Identity());
                     glyphScale *= 1 - 0.4f * t;
                     glyphOpacity *= 1 - t * t;
@@ -34292,8 +34948,14 @@ void Island::Render(bool force) {
                 glyphRect.left = centerX - full / 2;
                 glyphRect.right = centerX + full / 2;
             }
-            target->DrawText(slot.text.c_str(), (UINT32)slot.text.size(),
-                             format, glyphRect, brush.get());
+            if (!g_settings.islandMacIcons || slot.font != 1 ||
+                !DrawMacIcon(target, brush.get(), slot.item, slot.text,
+                             {(glyphRect.left + glyphRect.right) / 2,
+                              (glyphRect.top + glyphRect.bottom) / 2},
+                             contentOpacity * glyphOpacity)) {
+                target->DrawText(slot.text.c_str(), (UINT32)slot.text.size(),
+                                 format, glyphRect, brush.get());
+            }
             // Updates waiting: how many, on a red dot.
             if (slot.item == IslandItem::Updates && m_updatesDot > 0.004 &&
                 m_updatesDotCount > 0) {
@@ -36916,6 +37578,9 @@ void Island::OnClick(IslandItem item, const std::wstring& appId) {
         case IslandItem::Power:
             TogglePanel(m_power, item);
             break;
+        case IslandItem::AppName:
+            ShowAppMenu();
+            break;
         case IslandItem::Microphone:
             ToggleMicrophone();
             m_control.Refresh();
@@ -37704,9 +38369,21 @@ void LoadSettings() {
     g_settings.fullscreenGuard = Wh_GetIntSetting(L"hiding.fullscreenGuard") != 0;
     g_settings.hideTray = Wh_GetIntSetting(L"dock.hideTray") != 0;
     g_settings.showIsland = Wh_GetIntSetting(L"showIsland") != 0;
-    g_settings.islandBarSpread = Wh_GetIntSetting(L"barSpread") != 0;
-    g_settings.islandBarPills = Wh_GetIntSetting(L"barPills") != 0;
-    g_settings.islandBarAllMonitors = Wh_GetIntSetting(L"barAllMonitors") != 0;
+    g_settings.islandBarSpread = LoadDualSwitch(L"barSpread");
+    g_settings.islandBarPills = LoadDualSwitch(L"barPills");
+    g_settings.islandBarAllMonitors = LoadDualSwitch(L"barAllMonitors");
+    g_settings.islandAppName = LoadDualSwitch(L"appName");
+    g_settings.islandMacIcons = LoadDualSwitch(L"macIcons");
+    {
+        const auto font = WindhawkUtils::StringSetting::make(L"barFont");
+        g_barFont = font.get();
+        while (!g_barFont.empty() && g_barFont.back() == L' ') {
+            g_barFont.pop_back();
+        }
+        while (!g_barFont.empty() && g_barFont.front() == L' ') {
+            g_barFont.erase(0, 1);
+        }
+    }
     // The island's own options, chosen in it (see kIslandPrefs).
     g_settings.islandBar = Wh_GetIntValue(L"islandBar", 0) != 0;
     g_settings.islandTray = Wh_GetIntValue(L"islandTray", 1) != 0;
