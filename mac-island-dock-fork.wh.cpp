@@ -908,6 +908,11 @@ apps, então o resto da parte de baixo da tela continua clicável), ou como ela
     $name:pt-BR: Espaço nas pontas (px)
     $description: Between the first and last icons and the dock's edges (0-32, default 12)
     $description:pt-BR: Entre o primeiro e o último ícone e as bordas da dock (0-32, padrão 12)
+  - iconOffset: 0
+    $name: Icons' height in the dock (px)
+    $name:pt-BR: Altura dos ícones na dock (px)
+    $description: Moves the icons up (negative) or down (positive) from the dock's middle, if they look off-center (-10 to 10, default 0)
+    $description:pt-BR: Sobe (negativo) ou desce (positivo) os ícones a partir do meio da dock, se parecerem fora do centro (-10 a 10, padrão 0)
   - bottomGap: 6
     $name: Gap at the bottom (px)
     $name:pt-BR: Espaço embaixo (px)
@@ -1085,6 +1090,8 @@ struct {
     double bottomGap;
     // Between the icons at the ends and the dock's edges.
     double sidePadding;
+    // The icons moved down (or up, negative) from the dock's middle.
+    double iconOffset;
     double backgroundOpacity;
     int showDuration;
     int hideDuration;
@@ -3102,7 +3109,8 @@ void OnRenderingUnsafe() {
         dockTop = bounds.Y;
         dockBottom = bounds.Y + bounds.Height;
     }
-    const double dockMiddle = (dockTop + dockBottom) / 2;
+    const double dockMiddle =
+        (dockTop + dockBottom) / 2 + g_settings.iconOffset;
 
     struct Placed {
         DockIcon* icon;
@@ -38379,6 +38387,8 @@ void LoadSettings() {
     g_settings.bottomGap = std::clamp(Wh_GetIntSetting(L"dock.bottomGap"), 0, 16);
     g_settings.sidePadding =
         std::clamp(Wh_GetIntSetting(L"dock.sidePadding"), 0, 32);
+    g_settings.iconOffset =
+        std::clamp(Wh_GetIntSetting(L"dock.iconOffset"), -10, 10);
     g_settings.backgroundOpacity =
         std::clamp(Wh_GetIntSetting(L"dock.backgroundOpacity"), 0, 100) / 100.0;
     g_settings.showDuration =
