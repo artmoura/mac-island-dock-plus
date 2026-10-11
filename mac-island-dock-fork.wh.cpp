@@ -1,7 +1,7 @@
 // ==WindhawkMod==
-// @id              mac-island-dock
-// @name            Mac Island & Dock
-// @name:pt-BR      Ilha e Dock estilo Mac
+// @id              mac-island-dock-fork
+// @name            Mac Island & Dock (fork)
+// @name:pt-BR      Ilha e Dock estilo Mac (fork)
 // @description     An island at the top of the screen like the macOS menu bar and the iPhone's Dynamic Island (clock, control center, notifications, media, tray icons), and a macOS-like dock instead of the taskbar (or the Windows taskbar, transparent or as it is)
 // @description:pt-BR Uma ilha no topo da tela como a barra de menus do macOS e a Dynamic Island do iPhone (relógio, central de controle, notificações, mídia, ícones da bandeja) e uma dock como a do macOS no lugar da barra de tarefas (ou a barra do Windows, transparente ou como ela é)
 // @version         1.0.0
@@ -797,6 +797,16 @@ apps, então o resto da parte de baixo da tela continua clicável), ou como ela
   $name:pt-BR: Ilha no topo
   $description: The clock, the control center, notifications, what's playing and the other apps' tray icons, at the top of the screen. Its own options (style, colors, what it shows) are in it (right-click the island, then click the gear that comes out under it)
   $description:pt-BR: O relógio, a central de controle, as notificações, o que está tocando e os ícones dos outros apps, no topo da tela. As opções dela (estilo, cores, o que ela mostra) ficam nela mesma (clique com o botão direito na ilha e depois na engrenagem que sai embaixo dela)
+- barSpread: true
+  $name: Spread the items across the bar, like macOS
+  $name:pt-BR: Espalhar os itens pela barra, como no macOS
+  $description: Only with the island as a full-width bar. The power button, the apps with notifications, what's playing, weather, notes, tasks, shortcuts and updates go to the left end; the tray icons, usage, microphone, theme, network, volume, battery, bell and clock to the right end (in the order chosen in the island). With "clock in the middle", the clock sits alone at the center. Off, everything is together at the right end
+  $description:pt-BR: Só com a ilha como barra de largura total. O botão de desligar, os apps com notificações, o que está tocando, clima, anotações, tarefas, atalhos e atualizações vão para a ponta esquerda; os ícones da bandeja, uso, microfone, tema, rede, volume, bateria, sino e relógio para a ponta direita (na ordem escolhida na ilha). Com "relógio no meio", o relógio fica sozinho no centro. Desligado, tudo fica junto na ponta direita
+- barPills: true
+  $name: Bar background only behind the items
+  $name:pt-BR: Fundo da barra só atrás dos itens
+  $description: Only with the island as a full-width bar. A rounded piece behind each group of items (each end, and the clock when it's alone in the middle), and the rest of the bar clear, with the mouse going through it to the windows below. Off, the bar is filled from edge to edge
+  $description:pt-BR: Só com a ilha como barra de largura total. Uma peça arredondada atrás de cada grupo de itens (cada ponta, e o relógio quando ele fica sozinho no meio), e o resto da barra transparente, com o mouse passando por ela para as janelas de baixo. Desligado, a barra é preenchida de ponta a ponta
 - trayListIcons: 12
   $name: Tray icons shown before the list scrolls
   $name:pt-BR: Ícones da bandeja mostrados antes de a lista rolar
@@ -1085,6 +1095,11 @@ struct {
     // power button (sleep, restart, shut down) on it.
     bool islandClockCenter;
     bool islandPower;
+    // The bar's items at both ends, like the macOS menu bar (see
+    // BarGroupOnLeft).
+    bool islandBarSpread;
+    // The bar's background only behind its items, the rest clear.
+    bool islandBarPills;
     // Panels opening out of the pill as wide as it, when it's wider than
     // them (otherwise they drop out of the clicked item, at their own width).
     bool islandPanelsFollow;
@@ -19875,6 +19890,8 @@ class Island {
 
     HWND m_hwnd = nullptr;
     bool m_bar = false;
+    // The bar's items at both ends, as last laid out (see Layout).
+    bool m_barSpread = false;
     winrt::com_ptr<ID2D1Factory> m_d2d;
     winrt::com_ptr<IDWriteFactory> m_dwrite;
     LayeredCanvas m_canvas;
@@ -31298,8 +31315,28 @@ void Island::UpdateFormats(float scale) {
     }
 }
 
+// On the bar spread like the macOS menu bar (see islandBarSpread): the groups
+// at its left end, where macOS has the Apple menu and the app's menus; the
+// others (the status items and the clock) at its right end.
+bool BarGroupOnLeft(PillGroup group) {
+    switch (group) {
+        case PillGroup::Power:
+        case PillGroup::Apps:
+        case PillGroup::Media:
+        case PillGroup::Weather:
+        case PillGroup::Notes:
+        case PillGroup::Tasks:
+        case PillGroup::Shortcuts:
+        case PillGroup::Updates:
+            return true;
+        default:
+            return false;
+    }
+}
+
 // Places the items and sizes the island around them: centered in the pill,
-// at the right end of the bar (like the macOS menu bar's status items).
+// at the right end of the bar (like the macOS menu bar's status items), or
+// at both ends of it (see BarGroupOnLeft).
 void Island::Layout() {
     const HMONITOR monitor = CurrentMonitor();
     MONITORINFO info{sizeof(info)};
@@ -31391,6 +31428,12 @@ void Island::Layout() {
             {item, {x, 0, x + slot, height}, glyph, small ? 2 : 1});
         x += slot + spacing;
     };
+    // Where each group starts and ends (with the room after it), for the
+    // spread bar; -1 for the ones not shown.
+    float groupFrom[kPillGroups];
+    float groupTo[kPillGroups];
+    std::fill(std::begin(groupFrom), std::end(groupFrom), -1.0f);
+    std::fill(std::begin(groupTo), std::end(groupTo), -1.0f);
     // The groups of items, in the order chosen (see g_pillOrder), each
     // squeezed by how much it's shown.
     for (PillGroup group : g_pillOrder) {
@@ -31801,6 +31844,8 @@ void Island::Layout() {
             }
         }
         x = groupStart + (x - groupStart) * room;
+        groupFrom[(int)group] = groupStart;
+        groupTo[(int)group] = x;
     }
     // Minimized to a line at the very top only.
     if (!m_bar && AtTop()) {
@@ -31835,6 +31880,62 @@ void Island::Layout() {
             contentWidth += (before - after) * centered;
         }
     }
+    // The bar spread like the macOS menu bar: each end packed on its own (in
+    // the order chosen), and the clock alone in the middle if chosen. Placed
+    // in the bar's own coordinates before the groups' bases are taken, so a
+    // group moved to another place still slides there. Without room for both
+    // ends, everything stays together as usual.
+    bool barSpread = false;
+    if (m_bar && g_settings.islandBarSpread) {
+        const float width = (float)(m_monitor.right - m_monitor.left);
+        const int clockGroup = (int)PillGroup::Clock;
+        const bool clockAlone = g_settings.islandClockCenter &&
+                                clockMiddle >= 0 && groupFrom[clockGroup] >= 0;
+        auto inEnds = [&](PillGroup group) {
+            return groupFrom[(int)group] >= 0 &&
+                   !(clockAlone && group == PillGroup::Clock);
+        };
+        float shiftOf[kPillGroups]{};
+        float left = padding;
+        float rightWidth = 0;
+        for (PillGroup group : g_pillOrder) {
+            if (!inEnds(group)) {
+                continue;
+            }
+            const int i = (int)group;
+            const float span = groupTo[i] - groupFrom[i];
+            if (BarGroupOnLeft(group)) {
+                shiftOf[i] = left - groupFrom[i];
+                left += span;
+            } else {
+                rightWidth += span;
+            }
+        }
+        float right = width - padding - std::max(0.0f, rightWidth - spacing);
+        bool fits = left <= right;
+        if (clockAlone) {
+            shiftOf[clockGroup] = std::round(width / 2 - clockMiddle);
+            fits = fits && left <= groupFrom[clockGroup] + shiftOf[clockGroup] &&
+                   groupTo[clockGroup] + shiftOf[clockGroup] <= right;
+        }
+        if (fits) {
+            for (PillGroup group : g_pillOrder) {
+                if (!inEnds(group) || BarGroupOnLeft(group)) {
+                    continue;
+                }
+                const int i = (int)group;
+                shiftOf[i] = right - groupFrom[i];
+                right += groupTo[i] - groupFrom[i];
+            }
+            for (auto& slot : m_slots) {
+                if (slot.group >= 0) {
+                    slot.rect.left += shiftOf[slot.group];
+                    slot.rect.right += shiftOf[slot.group];
+                }
+            }
+            barSpread = true;
+        }
+    }
     // Where each group starts, and each still sliding from where it was.
     for (int i = 0; i < kPillGroups; i++) {
         m_groupBase[i] = -1;
@@ -31855,7 +31956,8 @@ void Island::Layout() {
     if (m_bar) {
         const float width = (float)(m_monitor.right - m_monitor.left);
         const float shift =
-            g_settings.islandClockCenter && clockMiddle >= 0
+            barSpread ? 0
+            : g_settings.islandClockCenter && clockMiddle >= 0
                 ? std::max(padding, std::round(width / 2 - clockMiddle))
                 : width - padding - contentWidth;
         for (auto& slot : m_slots) {
@@ -31865,6 +31967,7 @@ void Island::Layout() {
         m_size = {(LONG)width, (LONG)height};
         m_position = {m_monitor.left, m_monitor.top};
         m_pill = {0, 0, width, height};
+        m_barSpread = barSpread;
         return;
     }
 
@@ -32609,7 +32712,8 @@ void Island::Render(bool force) {
     }
     key += std::to_wstring((int)(m_updatesDot * 1000)) + L"|" +
            std::to_wstring((int)(m_unseenDot * 1000)) + L"|" +
-           std::to_wstring((int)(m_weatherSwap * 1000)) + L"|";
+           std::to_wstring((int)(m_weatherSwap * 1000)) + L"|" +
+           (g_settings.islandBarPills ? L"P" : L"") + L"|";
     if (!force && key == m_drawnKey) {
         return;
     }
@@ -32625,7 +32729,47 @@ void Island::Render(bool force) {
     // opacity).
     target->CreateSolidColorBrush(Bg(1), brush.put());
 
-    if (m_bar) {
+    if (m_bar && g_settings.islandBarPills) {
+        // Only behind the items, the rest of the bar left clear (and the
+        // mouse going through it to the windows below): a rounded piece for
+        // each end, and one for the clock alone in the middle.
+        D2D1_RECT_F zones[3]{};
+        bool used[3]{};
+        const bool clockAlone = m_barSpread && g_settings.islandClockCenter;
+        for (const auto& slot : m_slots) {
+            if (slot.group < 0 || slot.rect.right - slot.rect.left < 0.5f) {
+                continue;
+            }
+            const auto group = (PillGroup)slot.group;
+            const int zone = !m_barSpread                             ? 2
+                             : clockAlone && group == PillGroup::Clock ? 1
+                             : BarGroupOnLeft(group)                   ? 0
+                                                                       : 2;
+            if (!used[zone]) {
+                zones[zone] = slot.rect;
+                used[zone] = true;
+            } else {
+                zones[zone].left = std::min(zones[zone].left, slot.rect.left);
+                zones[zone].right = std::max(zones[zone].right, slot.rect.right);
+            }
+        }
+        const float inset = std::round(3 * scale);
+        const float side = std::round(kIslandPadding * scale);
+        const float top = m_pill.top + inset;
+        const float bottom = m_pill.bottom - inset;
+        for (int i = 0; i < 3; i++) {
+            if (!used[i]) {
+                continue;
+            }
+            const float radius = (bottom - top) / 2;
+            target->FillRoundedRectangle(
+                {{std::max(m_pill.left, zones[i].left - side), top,
+                  std::min(m_pill.right, zones[i].right + side), bottom},
+                 radius,
+                 radius},
+                brush.get());
+        }
+    } else if (m_bar) {
         target->FillRectangle(m_pill, brush.get());
         brush->SetColor(Fg(0.08f));
         target->FillRectangle({m_pill.left, m_pill.bottom - 1, m_pill.right,
@@ -37102,6 +37246,8 @@ void LoadSettings() {
     g_settings.fullscreenGuard = Wh_GetIntSetting(L"hiding.fullscreenGuard") != 0;
     g_settings.hideTray = Wh_GetIntSetting(L"dock.hideTray") != 0;
     g_settings.showIsland = Wh_GetIntSetting(L"showIsland") != 0;
+    g_settings.islandBarSpread = Wh_GetIntSetting(L"barSpread") != 0;
+    g_settings.islandBarPills = Wh_GetIntSetting(L"barPills") != 0;
     // The island's own options, chosen in it (see kIslandPrefs).
     g_settings.islandBar = Wh_GetIntValue(L"islandBar", 0) != 0;
     g_settings.islandTray = Wh_GetIntValue(L"islandTray", 1) != 0;
