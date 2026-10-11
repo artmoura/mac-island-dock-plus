@@ -18009,6 +18009,49 @@ bool UsesImperialUnits() {
            system == 1;
 }
 
+// The names to look for, from what was typed: as it is, then cut at a comma
+// or a dash ("Campinas - SP"), then without a state's initials at its end
+// ("Belo Horizonte MG"): the service only knows the places' names.
+std::vector<std::wstring> WeatherSearchNames(const std::wstring& typed) {
+    std::vector<std::wstring> names;
+    auto add = [&](std::wstring name) {
+        while (!name.empty() && (name.back() == L' ' || name.back() == L'-' ||
+                                 name.back() == L',')) {
+            name.pop_back();
+        }
+        while (!name.empty() && name.front() == L' ') {
+            name.erase(0, 1);
+        }
+        if (!name.empty() &&
+            std::find(names.begin(), names.end(), name) == names.end()) {
+            names.push_back(std::move(name));
+        }
+    };
+    add(typed);
+    std::wstring cut = typed;
+    for (PCWSTR separator : {L",", L" - ", L" – ", L"/", L"("}) {
+        if (const size_t at = cut.find(separator); at != std::wstring::npos) {
+            cut.resize(at);
+        }
+    }
+    add(cut);
+    // A last word of two capitals, like a Brazilian state's ("MG").
+    if (const size_t space = cut.find_last_of(L' ');
+        space != std::wstring::npos && cut.size() - space - 1 == 2 &&
+        iswupper(cut[space + 1]) && iswupper(cut[space + 2])) {
+        add(cut.substr(0, space));
+    }
+    return names;
+}
+
+// The country set in Windows ("BR"), to prefer its places.
+std::wstring UserCountryCode() {
+    WCHAR country[16] = L"";
+    GetLocaleInfoEx(LOCALE_NAME_USER_DEFAULT, LOCALE_SISO3166CTRYNAME, country,
+                    ARRAYSIZE(country));
+    return country;
+}
+
 struct WeatherRequest {
     HWND notify;
     // A city to look for first (or the place known).
@@ -18022,19 +18065,41 @@ DWORD WINAPI WeatherThreadProc(LPVOID parameter) {
     if (!request->search.empty()) {
         Json found;
         const std::wstring language = Tr(L"en", L"pt");
-        if (!HttpsGetJson(
-                L"https://geocoding-api.open-meteo.com/v1/search?count=1&"
-                L"format=json&language=" +
-                    language + L"&name=" + UrlEncode(request->search),
-                &found)) {
-            PostMessage(request->notify, WM_APP_WEATHER, 2, 0);
+        const std::wstring country = UserCountryCode();
+        // Each way of the name in turn (see WeatherSearchNames); among the
+        // places with that name, the first one in the user's country.
+        const Json* match = nullptr;
+        bool answered = false;
+        for (const auto& name : WeatherSearchNames(request->search)) {
+            found = Json();
+            if (!HttpsGetJson(
+                    L"https://geocoding-api.open-meteo.com/v1/search?count=10&"
+                    L"format=json&language=" +
+                        language + L"&name=" + UrlEncode(name),
+                    &found)) {
+                continue;
+            }
+            answered = true;
+            const Json& results = found[L"results"];
+            for (size_t i = 0; i < results.Size() && !match; i++) {
+                if (results[i].type == Json::Type::Object &&
+                    _wcsicmp(results[i][L"country_code"].string.c_str(),
+                             country.c_str()) == 0) {
+                    match = &results[i];
+                }
+            }
+            if (!match && results[(size_t)0].type == Json::Type::Object) {
+                match = &results[(size_t)0];
+            }
+            if (match) {
+                break;
+            }
+        }
+        if (!match) {
+            PostMessage(request->notify, WM_APP_WEATHER, answered ? 1 : 2, 0);
             return 0;
         }
-        const Json& city = found[L"results"][(size_t)0];
-        if (city.type != Json::Type::Object) {
-            PostMessage(request->notify, WM_APP_WEATHER, 1, 0);
-            return 0;
-        }
+        const Json& city = *match;
         place.name = city[L"name"].string;
         if (!city[L"admin1"].string.empty() &&
             city[L"admin1"].string != place.name) {
@@ -26393,6 +26458,15 @@ bool HttpsGet(const std::wstring& url,
     HINTERNET session =
         WinHttpOpen(L"Windhawk", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
                     WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    // IPv4 tried too as soon as IPv6 is slow (Windows 11): on a network
+    // whose IPv6 doesn't reach a server that has an IPv6 address (like
+    // Open-Meteo's), the request would otherwise time out every time.
+    if (session) {
+        constexpr DWORD kWinHttpOptionIpv6FastFallback = 140;
+        BOOL on = TRUE;
+        WinHttpSetOption(session, kWinHttpOptionIpv6FastFallback, &on,
+                         sizeof(on));
+    }
     HINTERNET connection =
         session ? WinHttpConnect(session, host.c_str(), parts.nPort, 0)
                 : nullptr;
@@ -26404,7 +26478,8 @@ bool HttpsGet(const std::wstring& url,
                                  WINHTTP_FLAG_SECURE)
             : nullptr;
     if (request) {
-        WinHttpSetTimeouts(request, 2000, 2000, 2000, 3000);
+        // (Runs on threads of its own: a slow network waits a little.)
+        WinHttpSetTimeouts(request, 5000, 8000, 8000, 10000);
         DWORD status = 0;
         DWORD statusSize = sizeof(status);
         if (WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
