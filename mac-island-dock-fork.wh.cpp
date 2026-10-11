@@ -2154,6 +2154,10 @@ struct DockIcon {
     // when last checked, for which app (buttons are reused for other apps),
     // and when it last counted as a notification.
     winrt::weak_ref<FrameworkElement> badge;
+    // Other pictures on the button than its icon, like the overlay an app
+    // sets on it (Chrome's profile picture): kept inside the taskbar as the
+    // icon grows, like the badge (see CheckBadge).
+    std::vector<winrt::weak_ref<FrameworkElement>> overlays;
     std::wstring badgeText;
     bool badgeShown = false;
     std::wstring badgeAppId;
@@ -2622,6 +2626,17 @@ void CheckBadge(DockIcon& icon) {
     Controls::TextBlock text = badge ? FindBadgeText(badge) : nullptr;
     if (badge && text && badge != icon.badge.get()) {
         WatchBadge(icon, button, badge, text);
+    }
+
+    // The button's other pictures (an overlay can be set or removed anytime).
+    icon.overlays.clear();
+    std::vector<FrameworkElement> images;
+    FindAllByClassName(button, {L"Windows.UI.Xaml.Controls.Image"}, images);
+    const auto mainImage = icon.image.get();
+    for (const auto& image : images) {
+        if (image != mainImage) {
+            icon.overlays.push_back(winrt::make_weak(image));
+        }
     }
 
     const std::wstring appId = GetButtonAppId(button);
@@ -3180,6 +3195,24 @@ void OnRenderingUnsafe() {
                     contentTop,
                     (double)badgeParent.TransformToVisual(button)
                         .TransformPoint({badgeOffset.x, badgeOffset.y})
+                        .Y);
+            }
+        }
+        // So does an overlay picture (see DockIcon::overlays).
+        for (const auto& weakOverlay : icon.overlays) {
+            auto overlay = weakOverlay.get();
+            if (!overlay || overlay.ActualHeight() <= 0 ||
+                overlay.Visibility() != Visibility::Visible ||
+                overlay.Opacity() <= 0) {
+                continue;
+            }
+            if (auto overlayParent = Media::VisualTreeHelper::GetParent(overlay)
+                                         .try_as<UIElement>()) {
+                const auto overlayOffset = overlay.ActualOffset();
+                contentTop = std::min(
+                    contentTop,
+                    (double)overlayParent.TransformToVisual(button)
+                        .TransformPoint({overlayOffset.x, overlayOffset.y})
                         .Y);
             }
         }
