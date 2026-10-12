@@ -1,5 +1,6 @@
 compile.log
 *.log
 Inter-4.1/
+Inter-*.zip
 tools/*.exe
 edgelog.txt
