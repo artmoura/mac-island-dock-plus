@@ -20457,6 +20457,12 @@ class Island {
     // The compact pill opened by the mouse on it (see islandCompact); it
     // closes a moment after the mouse leaves (see kCompactTimerId).
     bool m_compactOpen = false;
+    // The clock kept in the middle of the pill: not while it's compact and
+    // closed, which takes only the room of what it shows.
+    bool ClockCentered() const {
+        return g_settings.islandClockCenter &&
+               !(g_settings.islandCompact && !m_bar && !m_compactOpen);
+    }
     // The room the tray icons' list may take for the pill to stay within its
     // largest width (see pillMaxWidth), from the last layout; -1 for no
     // limit.
@@ -33679,7 +33685,7 @@ void Island::Layout() {
         }
     }
     if (m_clockCenterAmount < 0) {
-        m_clockCenterAmount = g_settings.islandClockCenter ? 1 : 0;
+        m_clockCenterAmount = ClockCentered() ? 1 : 0;
     }
     const float centered = (float)std::clamp(m_clockCenterAmount, 0.0, 1.0);
     if (centered > 0.001f && clockMiddle >= 0 && !m_bar) {
@@ -36137,8 +36143,7 @@ void Island::AnimationFrame() {
     }
     if (m_clockCenterAmount >= 0 &&
         SpringTowards(m_clockCenterAmount, m_clockCenterVelocity,
-                      g_settings.islandClockCenter ? 1 : 0, kOpenSeconds,
-                      dt)) {
+                      ClockCentered() ? 1 : 0, kOpenSeconds, dt)) {
         apps = true;
     }
     if (!m_microphoneShown.empty() && m_microphoneGlyph.empty() &&
