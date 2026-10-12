@@ -1140,6 +1140,9 @@ struct {
     bool islandAppName;
     // Wi-Fi, volume and battery drawn like macOS's (see DrawMacIcon).
     bool islandMacIcons;
+    // The pill showing only some groups until the mouse is on it (see
+    // g_compactGroups).
+    bool islandCompact;
     // Panels opening out of the pill as wide as it, when it's wider than
     // them (otherwise they drop out of the clicked item, at their own width).
     bool islandPanelsFollow;
@@ -7464,6 +7467,9 @@ constexpr UINT_PTR kUpdatesTimerId = 15;
 // Where the mouse is, checked this often while the island follows it (several
 // monitors only).
 constexpr UINT_PTR kMonitorTimerId = 20;
+// The compact pill closing after the mouse left it (see islandCompact).
+constexpr UINT_PTR kCompactTimerId = 57;
+constexpr UINT kCompactCloseMs = 700;
 constexpr UINT kMonitorCheckMs = 250;
 // How far the island stays open while it glides to another monitor (its
 // dot, see Island::AppearFade).
@@ -11014,6 +11020,8 @@ enum class IslandPref {
     MacIcons,
     // The colors following Windows' light and dark mode (see LoadTheme).
     ThemeFollow,
+    // The compact pill (see islandCompact).
+    Compact,
 };
 
 struct IslandPrefInfo {
@@ -11118,6 +11126,9 @@ const IslandPrefInfo kIslandPrefs[] = {
     {IslandPref::ThemeFollow, L"islandThemeFollow", 0xE706,
      L"Colors follow Windows' light and dark mode",
      L"Cores seguem o modo claro e escuro do Windows"},
+    {IslandPref::Compact, L"islandCompact", 0xE73F,
+     L"Compact pill, opening with the mouse on it",
+     L"Pílula compacta, expande com o mouse em cima"},
 };
 
 // The groups of items on the pill, which can be put in another order in the
@@ -11460,6 +11471,11 @@ void SaveDualSwitch(PCWSTR setting, bool on) {
 
 // The font of the island's text (see UpdateFormats), or empty for Windows'.
 std::wstring g_barFont;
+
+// The groups the compact pill shows until the mouse is on it (bits by
+// PillGroup; the clock always): the processor, memory and video memory use
+// by default.
+unsigned g_compactGroups = 1u << 9;
 
 void SetTrayListIcons(int icons, bool keep);
 
@@ -12295,6 +12311,7 @@ class ControlPanel : public Panel {
         SettingToggle,     // An island option's switch (its IslandPref).
         StyleSegment,      // The pill (0) or the bar (1).
         ThemeSwatch,       // A theme (its index).
+        CompactChip,       // A group kept by the compact pill (PillGroup).
         PlaceDot,          // A ready place for all apps (0-8).
         AppPlacesRow,      // "Place per app".
         AppPlaceDot,       // An app's place (entry * 9 + place).
@@ -12461,7 +12478,9 @@ class ControlPanel : public Panel {
                  pref == IslandPref::BarPills ||
                  pref == IslandPref::BarAllMonitors ||
                  pref == IslandPref::AppName) &&
-                !GetIslandPref(IslandPref::Bar));
+                !GetIslandPref(IslandPref::Bar)) ||
+               // Only for the pill.
+               (pref == IslandPref::Compact && GetIslandPref(IslandPref::Bar));
     }
     void DrawShortcut(ID2D1RenderTarget* target,
                       ID2D1SolidColorBrush* brush,
@@ -12677,7 +12696,9 @@ class ControlPanel : public Panel {
         Order,
         Pref,
         // A row with a few choices (its ChoiceId).
-        Choice
+        Choice,
+        // The groups the compact pill keeps (see g_compactGroups).
+        CompactGroups
     };
     struct SettingEntry {
         SettingKind kind;
@@ -12770,6 +12791,10 @@ class ControlPanel : public Panel {
     void DrawAppPlaces(ID2D1RenderTarget* target, ID2D1SolidColorBrush* brush);
     D2D1_RECT_F m_styleSegments[2]{};
     D2D1_RECT_F m_swatches[2][(int)ThemeId::Count]{};
+    // The compact pill's groups: the row, and a chip each (empty for the
+    // clock, always kept, and the app's name, only on the bar).
+    D2D1_RECT_F m_compactRow{};
+    D2D1_RECT_F m_compactChips[kPillGroups]{};
     double m_styleKnob = -1;
     double m_styleKnobVelocity = 0;
     // The switches' knobs, by key.
@@ -20322,6 +20347,9 @@ class Island {
     void SetMirrorAppBar(BarMirror& mirror, int height);
     void ComposeMirrors();
     void VisitMonitor(HMONITOR monitor);
+    // The compact pill opened by the mouse on it (see islandCompact); it
+    // closes a moment after the mouse leaves (see kCompactTimerId).
+    bool m_compactOpen = false;
     // The app in front, its name on the bar (see PillGroup::AppName), and
     // its menu (minimize, maximize, close, quit).
     std::wstring m_appName;
@@ -22302,6 +22330,8 @@ float ControlPanel::SettingHeight(SettingKind kind) {
             return 66;
         case SettingKind::Choice:
             return 44;
+        case SettingKind::CompactGroups:
+            return 100;
         default:
             return 34;
     }
@@ -22336,6 +22366,10 @@ std::wstring ControlPanel::SettingText(const SettingEntry& entry) const {
             text +=
                 L" Colors theme black graphite light accent glass dark mode "
                 L"Cores tema preto grafite claro destaque vidro modo escuro";
+            break;
+        case SettingKind::CompactGroups:
+            text += L" Compact pill items mouse hover open Pílula compacta "
+                    L"itens mouse expandir";
             break;
         case SettingKind::Size:
             text += entry.value == 3
@@ -22467,6 +22501,8 @@ void ControlPanel::LayoutSettings() {
             {(int)SettingKind::Choice, kChoiceMonitor, kSectionPlace},
             {(int)SettingKind::Label, 0, kSectionPill},
             {(int)SettingKind::Order, 0, kSectionPill},
+            {(int)SettingKind::Pref, (int)IslandPref::Compact, kSectionPill},
+            {(int)SettingKind::CompactGroups, 0, kSectionPill},
             {(int)SettingKind::Pref, (int)IslandPref::ClockCenter,
              kSectionPill},
             {(int)SettingKind::Pref, (int)IslandPref::Network, kSectionPill},
@@ -22580,6 +22616,11 @@ void ControlPanel::LayoutSettings() {
             !g_themeFollow) {
             entry.shown = false;
         }
+        // The compact pill's groups only while it's on.
+        if (entry.kind == SettingKind::CompactGroups &&
+            !g_settings.islandCompact) {
+            entry.shown = false;
+        }
         sectionShown[entry.section] |= entry.shown;
     }
     float sectionHeight[kSectionCount] = {};
@@ -22648,6 +22689,29 @@ void ControlPanel::LayoutSettings() {
                                           middle - swatch / 2, swatchRight,
                                           middle + swatch / 2};
                     swatchRight -= swatch + swatchGap;
+                }
+                break;
+            }
+            case SettingKind::CompactGroups: {
+                // Its title, then the chips in lines under it.
+                m_compactRow = rect;
+                const float chip = std::round(26 * s);
+                const float gap = std::round(6 * s);
+                const float startX = rect.left + std::round(6 * s);
+                float x = startX;
+                float y = top + std::round(32 * s);
+                for (int i = 0; i < kPillGroups; i++) {
+                    if (i == (int)PillGroup::Clock ||
+                        i == (int)PillGroup::AppName) {
+                        m_compactChips[i] = {};
+                        continue;
+                    }
+                    if (x + chip > rect.right - std::round(4 * s)) {
+                        x = startX;
+                        y += chip + gap;
+                    }
+                    m_compactChips[i] = {x, y, x + chip, y + chip};
+                    x += chip + gap;
                 }
                 break;
             }
@@ -22931,6 +22995,14 @@ ControlPanel::Hit ControlPanel::HitTest(POINT pt) const {
                     }
                     break;
                 }
+                case SettingKind::CompactGroups:
+                    for (int i = 0; i < kPillGroups; i++) {
+                        const D2D1_RECT_F& r = m_compactChips[i];
+                        if (r.right > r.left && PointInRect(list, r)) {
+                            return {Part::CompactChip, i};
+                        }
+                    }
+                    break;
                 case SettingKind::Size: {
                     const int slider = entry.value;
                     if (PointInRect(list, m_sizeReset[slider])) {
@@ -24256,6 +24328,41 @@ void ControlPanel::DrawSettingEntry(ID2D1RenderTarget* target,
                              radius + std::round(3.5f * s)},
                             brush, 2);
                     }
+                }
+            }
+            break;
+        case SettingKind::CompactGroups:
+            // The groups the compact pill keeps: a chip each, lit when kept.
+            {
+                const D2D1_RECT_F title{m_compactRow.left, m_compactRow.top,
+                                        m_compactRow.right,
+                                        m_compactRow.top + std::round(30 * s)};
+                label(title, (WCHAR)0xE73F,
+                      Tr(L"Kept on the compact pill (the clock always)",
+                         L"Na pílula compacta (o relógio sempre)"),
+                      title.right, 1);
+                for (int i = 0; i < kPillGroups; i++) {
+                    const D2D1_RECT_F& r = m_compactChips[i];
+                    if (r.right <= r.left) {
+                        continue;
+                    }
+                    const bool kept = (g_compactGroups & (1u << i)) != 0;
+                    const bool hover =
+                        m_hover.part == Part::CompactChip && m_hover.index == i;
+                    const float radius = std::round(7 * s);
+                    if (kept) {
+                        brush->SetColor(D2D1::ColorF(0.04f, 0.52f, 1.0f, 0.9f));
+                        target->FillRoundedRectangle({r, radius, radius},
+                                                     brush);
+                    } else {
+                        brush->SetColor(Fg(hover ? 0.16f : 0.08f));
+                        target->FillRoundedRectangle({r, radius, radius},
+                                                     brush);
+                    }
+                    const WCHAR glyph = kPillGroupInfo[i].glyph;
+                    brush->SetColor(kept ? D2D1::ColorF(1, 1, 1, 1)
+                                         : Fg(hover ? 0.9f : 0.6f));
+                    target->DrawText(&glyph, 1, m_iconFormat.get(), r, brush);
                 }
             }
             break;
@@ -25867,8 +25974,10 @@ bool ControlPanel::OnMouseUp(POINT pt) {
         case Part::SettingToggle: {
             const IslandPref pref = (IslandPref)hit.index;
             SetIslandPref(pref, GetIslandPref(pref) ? 0 : 1);
-            // The dark mode's colors come or go under it.
-            if (pref == IslandPref::ThemeFollow) {
+            // The dark mode's colors (or the compact pill's groups) come or
+            // go under it.
+            if (pref == IslandPref::ThemeFollow ||
+                pref == IslandPref::Compact) {
                 Layout();
             }
             return true;
@@ -25968,6 +26077,15 @@ bool ControlPanel::OnMouseUp(POINT pt) {
                 SavePlaces();
                 ListOpenApps();
                 Layout();
+            }
+            return true;
+        case Part::CompactChip:
+            // Kept by the compact pill, or not.
+            g_compactGroups ^= 1u << hit.index;
+            Wh_SetIntValue(L"compactGroups", (int)g_compactGroups);
+            StartIslandAnimation();
+            if (g_island) {
+                g_island->OnPreferencesChanged();
             }
             return true;
         case Part::ThemeSwatch: {
@@ -29769,6 +29887,8 @@ int GetIslandPref(IslandPref pref) {
             return g_settings.islandMacIcons;
         case IslandPref::ThemeFollow:
             return g_themeFollow;
+        case IslandPref::Compact:
+            return g_settings.islandCompact;
     }
     return 0;
 }
@@ -30007,6 +30127,9 @@ void SetIslandPref(IslandPref pref, int value) {
             // (Kept above; the colors for the mode Windows is in now.)
             LoadTheme(true);
             StartIslandAnimation();
+            break;
+        case IslandPref::Compact:
+            g_settings.islandCompact = on;
             break;
     }
     if (g_island) {
@@ -30677,6 +30800,13 @@ bool Island::GroupWanted(PillGroup group) const {
     // On the bar only (the pill would grow with every app).
     if (group == PillGroup::AppName) {
         return m_bar && g_settings.islandAppName && !m_appName.empty();
+    }
+    // The compact pill: only the groups chosen for it until the mouse is on
+    // it (see m_compactOpen).
+    if (g_settings.islandCompact && !m_bar && !m_compactOpen &&
+        group != PillGroup::Clock &&
+        !(g_compactGroups & (1u << (int)group))) {
+        return false;
     }
     if (group == PillGroup::Microphone && m_microphoneGlyph.empty()) {
         return false;
@@ -38029,6 +38159,24 @@ LRESULT Island::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam,
                 CheckMonitor();
                 return 0;
             }
+            if (wParam == kCompactTimerId) {
+                // Still in use (a panel open, a reply typed, the mouse back):
+                // checked again later.
+                POINT cursor;
+                RECT window;
+                const bool mouseOn = GetCursorPos(&cursor) &&
+                                     GetWindowRect(m_hwnd, &window) &&
+                                     WindowFromPoint(cursor) == m_hwnd &&
+                                     PtInRect(&window, cursor);
+                if (AnyPanelOpen() || m_bannerTyping || m_dragArmed ||
+                    mouseOn) {
+                    return 0;
+                }
+                KillTimer(m_hwnd, kCompactTimerId);
+                m_compactOpen = false;
+                StartAnimating();
+                return 0;
+            }
             if (wParam == kDeviceRetryTimerId) {
                 KillTimer(m_hwnd, kDeviceRetryTimerId);
                 m_deviceRetryPending = false;
@@ -38270,6 +38418,14 @@ LRESULT Island::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam,
                 TRACKMOUSEEVENT track{sizeof(track), TME_LEAVE, hWnd, 0};
                 m_tracking = TrackMouseEvent(&track);
             }
+            // The compact pill opens with the mouse on it.
+            if (g_settings.islandCompact && !m_bar) {
+                KillTimer(m_hwnd, kCompactTimerId);
+                if (!m_compactOpen) {
+                    m_compactOpen = true;
+                    StartAnimating();
+                }
+            }
             // Dragging the pill: it follows the mouse once it has moved a
             // little.
             if (m_dragArmed && (wParam & MK_LBUTTON)) {
@@ -38343,6 +38499,10 @@ LRESULT Island::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam,
 
         case WM_MOUSELEAVE:
             m_tracking = false;
+            // The compact pill closes a moment later (see kCompactTimerId).
+            if (m_compactOpen) {
+                SetTimer(m_hwnd, kCompactTimerId, kCompactCloseMs, nullptr);
+            }
             // The banner goes a moment after the mouse leaves it, and the
             // tray icons' list a bit later.
             if (m_bannerWanted && !m_bannerTyping && !m_banner.sticky) {
@@ -38728,6 +38888,9 @@ void LoadSettings() {
     g_settings.islandBarAllMonitors = LoadDualSwitch(L"barAllMonitors");
     g_settings.islandAppName = LoadDualSwitch(L"appName");
     g_settings.islandMacIcons = LoadDualSwitch(L"macIcons");
+    g_settings.islandCompact = Wh_GetIntValue(L"islandCompact", 0) != 0;
+    g_compactGroups =
+        (unsigned)Wh_GetIntValue(L"compactGroups", 1 << (int)PillGroup::Usage);
     {
         const auto font = WindhawkUtils::StringSetting::make(L"barFont");
         g_barFont = font.get();
