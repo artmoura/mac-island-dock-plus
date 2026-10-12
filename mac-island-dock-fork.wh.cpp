@@ -1599,6 +1599,10 @@ bool g_turnedAutoHideOn;
 // after the mouse reaches the edge.
 constexpr UINT_PTR kHideTimerId = 2;
 constexpr UINT_PTR kUnhideTimerId = 3;
+// Posted to a taskbar whose dock comes up: the magnification moves to it
+// (see MoveDockBehavior).
+const UINT g_moveDockMessage =
+    RegisterWindowMessage(L"Windhawk_MacIslandDock_MoveDock_" WH_MOD_ID);
 
 BOOL CALLBACK FindTaskbarProc(HWND hWnd, LPARAM lParam) {
     DWORD dwProcessId;
@@ -3090,14 +3094,15 @@ void ResetAppsArea() {
     g_appsAreaRight = 0;
 }
 
-// The docks on the other monitors (their taskbars have no magnification, so
-// no rendering to follow): their windows cut to the dock too, as their
-// background's size changes (an app opening or closing). Taskbar thread.
+// Every dock (one per monitor): its window cut to the dock, as its
+// background's size changes (an app opening or closing), and what the
+// magnification needs to move to it (see MoveDockBehavior). Taskbar thread.
 struct SecondaryDock {
     HWND hWnd;
     winrt::weak_ref<FrameworkElement> background;
     FrameworkElement::SizeChanged_revoker revoker;
     RECT region;
+    winrt::weak_ref<FrameworkElement> frame;
 };
 std::vector<SecondaryDock> g_secondaryDocks;
 
@@ -3141,10 +3146,13 @@ void UpdateSecondaryDockRegion(SecondaryDock& dock) {
     SetRegionIfChanged(dock.hWnd, region);
 }
 
-void WatchSecondaryDock(HWND hWnd, FrameworkElement const& background) {
+void WatchSecondaryDock(HWND hWnd,
+                        FrameworkElement const& background,
+                        FrameworkElement const& frame) {
     for (auto& dock : g_secondaryDocks) {
         if (dock.hWnd == hWnd) {
             dock.background = winrt::make_weak(background);
+            dock.frame = winrt::make_weak(frame);
             dock.revoker = background.SizeChanged(
                 winrt::auto_revoke, [hWnd](auto const&, auto const&) {
                     Safely(L"Cutting a dock's window", [&] {
@@ -3159,8 +3167,8 @@ void WatchSecondaryDock(HWND hWnd, FrameworkElement const& background) {
             return;
         }
     }
-    g_secondaryDocks.push_back({hWnd, nullptr, {}, {}});
-    WatchSecondaryDock(hWnd, background);
+    g_secondaryDocks.push_back({hWnd, nullptr, {}, {}, nullptr});
+    WatchSecondaryDock(hWnd, background, frame);
 }
 
 // After a slide (from the tray's thread, so without XAML): the region again,
@@ -3353,14 +3361,9 @@ void OnRenderingUnsafe() {
     if (IsTransparentTaskbar() && !placed.empty()) {
         UpdateAppsArea(left, right, true);
     }
-    // The dock: the taskbar's window only where the dock is (with room for
-    // the magnified icons), so the mouse goes through the rest of the bottom
-    // of the screen to the windows there.
-    if (IsDock() && !placed.empty()) {
-        UpdateAppsArea(dockRight > dockLeft ? std::min(left, dockLeft) : left,
-                       dockRight > dockLeft ? std::max(right, dockRight) : right,
-                       false);
-    }
+    // (The dock's window is cut to it by WatchSecondaryDock, for every dock.)
+    (void)dockLeft;
+    (void)dockRight;
 
     // The transparent taskbar's shadow: stronger over light windows, and
     // with the mouse on the taskbar.
@@ -3542,6 +3545,68 @@ void SetupDockBehavior(HWND hWnd,
     });
     g_badgeTimer.Start();
 
+}
+
+// The dock coming up on another monitor gets the magnification (and its
+// icons lined up with it): it leaves the dock that had it, whose icons go back
+// to their size where they are. The apps' badges stay as they are known (the
+// island would take them for read otherwise). Taskbar thread.
+void MoveDockBehavior(HWND hWnd) {
+    if (hWnd == g_dockWnd || !IsDock() || g_unloading) {
+        return;
+    }
+    FrameworkElement frame{nullptr};
+    FrameworkElement background{nullptr};
+    for (const auto& dock : g_secondaryDocks) {
+        if (dock.hWnd == hWnd) {
+            frame = dock.frame.get();
+            background = dock.background.get();
+        }
+    }
+    if (!frame || !background) {
+        return;
+    }
+    Wh_Log(L"The magnification moves to the dock of %p", hWnd);
+    for (auto& icon : g_dockIcons) {
+        icon.magnification = 1;
+        if (icon.scale) {
+            icon.scale.ScaleX(1);
+            icon.scale.ScaleY(1);
+        }
+    }
+    if (g_badgeTimer) {
+        g_badgeTimer.Stop();
+        g_badgeTimer = nullptr;
+    }
+    g_renderingRevoker.revoke();
+    g_layoutRevoker.revoke();
+    g_stateRevokers.clear();
+    g_dotRevokers.clear();
+    for (const auto& watch : g_badgeWatches) {
+        if (auto element = watch.element.get()) {
+            element.UnregisterPropertyChangedCallback(watch.property,
+                                                      watch.token);
+        }
+    }
+    g_badgeWatches.clear();
+    if (auto target = g_pointerTarget.get()) {
+        if (g_pointerHandler) {
+            target.RemoveHandler(UIElement::PointerMovedEvent(),
+                                 g_pointerHandler);
+        }
+        if (g_pressedHandler) {
+            target.RemoveHandler(UIElement::PointerPressedEvent(),
+                                 g_pressedHandler);
+        }
+    }
+    g_pointerHandler = nullptr;
+    g_pressedHandler = nullptr;
+    g_pointerTarget = nullptr;
+    g_watchedButtons.clear();
+    g_dockIcons.clear();
+    SetupDockBehavior(hWnd, frame, background);
+    // It's coming up (what moved it here), so it's shown.
+    g_trayShown = true;
 }
 
 void ResetDockBehavior() {
@@ -3737,12 +3802,14 @@ bool ApplyStyle(XamlRoot xamlRoot, HWND hWnd, bool mainTaskbar) {
         }
     }
 
-    // Magnification and bouncing follow the mouse on the main taskbar. The
-    // others are only cut to their dock.
+    // Every dock's window cut to the dock. Magnification and bouncing start
+    // on the main taskbar, and move to the dock that comes up on another
+    // monitor (see MoveDockBehavior).
+    if (dockBackground) {
+        WatchSecondaryDock(hWnd, dockBackground, frame);
+    }
     if (mainTaskbar) {
         SetupDockBehavior(hWnd, frame, dockBackground);
-    } else if (dockBackground) {
-        WatchSecondaryDock(hWnd, dockBackground);
     }
     return true;
 }
@@ -4135,6 +4202,12 @@ void WINAPI TrayUI_SlideWindow_Hook(void* pThis,
         PostMessage(hWnd, WM_TIMER, kHideTimerId, 0);
         return;
     }
+    // The magnification moves to the dock coming up (on its own thread, with
+    // its XAML, see MoveDockBehavior).
+    if (show && !g_unloading && IsDock() && hWnd != g_dockWnd &&
+        g_moveDockMessage) {
+        PostMessage(hWnd, g_moveDockMessage, 0, 0);
+    }
 
     if (hWnd == g_dockWnd) {
         g_trayShown = show;
@@ -4158,11 +4231,11 @@ void WINAPI TrayUI_SlideWindow_Hook(void* pThis,
 
     if (!animate || g_unloading) {
         TrayUI_SlideWindow_Original(pThis, hWnd, rect, monitor, show, animate);
-        if (!g_unloading && (IsTransparentTaskbar() || IsDock()) &&
-            hWnd == g_dockWnd && g_appsRight > g_appsLeft) {
+        if (!g_unloading && IsTransparentTaskbar() && hWnd == g_dockWnd &&
+            g_appsRight > g_appsLeft) {
             UpdateAppsArea(g_appsLeft, g_appsRight, false);
         }
-        if (!g_unloading && IsDock() && hWnd != g_dockWnd) {
+        if (!g_unloading && IsDock()) {
             KeepSecondaryDockRegion(hWnd);
         }
         return;
@@ -4176,11 +4249,11 @@ void WINAPI TrayUI_SlideWindow_Hook(void* pThis,
             show);
     TrayUI_SlideWindow_Original(pThis, hWnd, rect, monitor, show, false);
     // Still cut down to its apps.
-    if ((IsTransparentTaskbar() || IsDock()) && hWnd == g_dockWnd &&
+    if (IsTransparentTaskbar() && hWnd == g_dockWnd &&
         g_appsRight > g_appsLeft) {
         UpdateAppsArea(g_appsLeft, g_appsRight, false);
     }
-    if (IsDock() && hWnd != g_dockWnd) {
+    if (IsDock()) {
         KeepSecondaryDockRegion(hWnd);
     }
 }
@@ -5000,6 +5073,10 @@ LRESULT CALLBACK TaskbarSubclassProc(HWND hWnd,
     // From the island (in its own process): send everything later (not
     // while it waits for the answer), where the tray icons are, and apps with
     // a new notification.
+    if (uMsg == g_moveDockMessage && g_moveDockMessage) {
+        Safely(L"Moving the magnification", [&] { MoveDockBehavior(hWnd); });
+        return 0;
+    }
     if (uMsg == g_sendTrayIconsMessage && g_sendTrayIconsMessage) {
         g_trayIconsSendPending = false;
         SendTrayIcons();
