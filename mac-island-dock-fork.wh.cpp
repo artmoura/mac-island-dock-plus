@@ -1150,6 +1150,8 @@ struct {
     bool islandCompact;
     // The pill's largest width (or length, upright), in % of the screen.
     int pillMaxWidth;
+    // The battery's charge in % next to its icon.
+    bool islandBatteryPercent;
     // Panels opening out of the pill as wide as it, when it's wider than
     // them (otherwise they drop out of the clicked item, at their own width).
     bool islandPanelsFollow;
@@ -6788,6 +6790,8 @@ enum class IslandItem {
     SettingsBubble,
     // The app in front's name, on the bar (see PillGroup::AppName).
     AppName,
+    // The battery's charge in %, next to its icon (a click opens the same).
+    BatteryPercent,
 };
 
 struct IslandSlot {
@@ -11029,6 +11033,8 @@ enum class IslandPref {
     ThemeFollow,
     // The compact pill (see islandCompact).
     Compact,
+    // The battery's charge in % (see islandBatteryPercent).
+    BatteryPercent,
 };
 
 struct IslandPrefInfo {
@@ -11136,6 +11142,8 @@ const IslandPrefInfo kIslandPrefs[] = {
     {IslandPref::Compact, L"islandCompact", 0xE73F,
      L"Compact pill, opening with the mouse on it",
      L"Pílula compacta, expande com o mouse em cima"},
+    {IslandPref::BatteryPercent, L"batteryPercent", 0xE83F,
+     L"Battery percentage", L"Porcentagem da bateria"},
 };
 
 // The groups of items on the pill, which can be put in another order in the
@@ -12487,7 +12495,9 @@ class ControlPanel : public Panel {
                  pref == IslandPref::AppName) &&
                 !GetIslandPref(IslandPref::Bar)) ||
                // Only for the pill.
-               (pref == IslandPref::Compact && GetIslandPref(IslandPref::Bar));
+               (pref == IslandPref::Compact && GetIslandPref(IslandPref::Bar)) ||
+               (pref == IslandPref::BatteryPercent &&
+                !GetIslandPref(IslandPref::Battery));
     }
     void DrawShortcut(ID2D1RenderTarget* target,
                       ID2D1SolidColorBrush* brush,
@@ -20970,6 +20980,11 @@ class Island {
     std::wstring m_networkGlyph;
     std::wstring m_volumeGlyph;
     std::wstring m_batteryGlyph;
+    // The battery's charge ("87%", see islandBatteryPercent), and its width
+    // as last measured.
+    std::wstring m_batteryText;
+    std::wstring m_batteryTextMeasured;
+    float m_batteryTextWidth = 0;
     std::wstring m_bellGlyph;
     std::wstring m_drawnKey;
     // An icon changing (the volume, the battery, the bell, the microphone):
@@ -22532,6 +22547,8 @@ void ControlPanel::LayoutSettings() {
             {(int)SettingKind::Pref, (int)IslandPref::Network, kSectionPill},
             {(int)SettingKind::Pref, (int)IslandPref::Volume, kSectionPill},
             {(int)SettingKind::Pref, (int)IslandPref::Battery, kSectionPill},
+            {(int)SettingKind::Pref, (int)IslandPref::BatteryPercent,
+             kSectionPill},
             {(int)SettingKind::Pref, (int)IslandPref::Bell, kSectionPill},
             {(int)SettingKind::Pref, (int)IslandPref::Power, kSectionPill},
             {(int)SettingKind::Pref, (int)IslandPref::AppName, kSectionPill},
@@ -29913,6 +29930,8 @@ int GetIslandPref(IslandPref pref) {
             return g_themeFollow;
         case IslandPref::Compact:
             return g_settings.islandCompact;
+        case IslandPref::BatteryPercent:
+            return g_settings.islandBatteryPercent;
     }
     return 0;
 }
@@ -30154,6 +30173,9 @@ void SetIslandPref(IslandPref pref, int value) {
             break;
         case IslandPref::Compact:
             g_settings.islandCompact = on;
+            break;
+        case IslandPref::BatteryPercent:
+            g_settings.islandBatteryPercent = on;
             break;
     }
     if (g_island) {
@@ -32792,6 +32814,16 @@ void Island::OnVolumeChanged() {
     Render();
 }
 
+// The battery's charge, like "87%"; nothing without a battery.
+std::wstring BatteryPercentText() {
+    SYSTEM_POWER_STATUS power;
+    if (!GetSystemPowerStatus(&power) || (power.BatteryFlag & 128) ||
+        power.BatteryFlag == 255 || power.BatteryLifePercent > 100) {
+        return {};
+    }
+    return std::to_wstring(power.BatteryLifePercent) + L"%";
+}
+
 // Nothing on a computer without a battery.
 std::wstring Island::BatteryGlyph() {
     SYSTEM_POWER_STATUS power;
@@ -32812,6 +32844,7 @@ void Island::UpdateStatus() {
     m_volumeGlyph = VolumeGlyph();
     m_microphoneGlyph = MicrophoneGlyph();
     m_batteryGlyph = BatteryGlyph();
+    m_batteryText = BatteryPercentText();
     // A moon while "Do not disturb" is on, like the macOS Focus icon.
     m_bellGlyph = {IsIslandQuiet() ? kGlyphMoon : kGlyphBell};
 }
@@ -32831,6 +32864,7 @@ void Island::UpdateFormats(float scale) {
     m_textFormat = nullptr;
     m_appNameFormat = nullptr;
     m_appNameMeasured.clear();
+    m_batteryTextMeasured.clear();
     // The app's name: bold, from its start, ending with "..." when too long.
     if (SUCCEEDED(m_dwrite->CreateTextFormat(
             textFont.c_str(), nullptr, DWRITE_FONT_WEIGHT_BOLD,
@@ -33216,6 +33250,38 @@ void Island::Layout() {
                 addIcon(IslandItem::Volume, m_volumeGlyph);
                 break;
             case PillGroup::Battery:
+                // Its charge before it, like on macOS (not upright, where it
+                // wouldn't fit).
+                if (g_settings.islandBatteryPercent && !m_vertical &&
+                    !m_batteryGlyph.empty() && !m_batteryText.empty() &&
+                    m_textFormat) {
+                    if (m_batteryTextMeasured != m_batteryText) {
+                        m_batteryTextMeasured = m_batteryText;
+                        m_batteryTextWidth = 0;
+                        winrt::com_ptr<IDWriteTextLayout> layout;
+                        if (SUCCEEDED(m_dwrite->CreateTextLayout(
+                                m_batteryText.c_str(),
+                                (UINT32)m_batteryText.size(),
+                                m_textFormat.get(), 1000 * scale, height,
+                                layout.put()))) {
+                            if (m_tabular) {
+                                layout->SetTypography(
+                                    m_tabular.get(),
+                                    {0, (UINT32)m_batteryText.size()});
+                            }
+                            DWRITE_TEXT_METRICS metrics{};
+                            layout->GetMetrics(&metrics);
+                            m_batteryTextWidth = std::ceil(metrics.width);
+                        }
+                    }
+                    const float textWidth =
+                        m_batteryTextWidth + std::round(4 * scale);
+                    m_slots.push_back({IslandItem::BatteryPercent,
+                                       {x, 0, x + textWidth, height},
+                                       m_batteryText,
+                                       0});
+                    x += textWidth;
+                }
                 addIcon(IslandItem::Battery, m_batteryGlyph);
                 break;
             case PillGroup::Clock:
@@ -37963,6 +38029,10 @@ void Island::TogglePanel(Panel& panel, IslandItem item) {
 }
 
 void Island::OnClick(IslandItem item, const std::wstring& appId) {
+    // The battery's charge opens what the battery does.
+    if (item == IslandItem::BatteryPercent) {
+        item = IslandItem::Battery;
+    }
     switch (item) {
         case IslandItem::App: {
             // An app with a badge on the taskbar opens; one with unread
@@ -38448,6 +38518,7 @@ LRESULT Island::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam,
                     break;
                 case kStatusBattery:
                     m_batteryGlyph = BatteryGlyph();
+                    m_batteryText = BatteryPercentText();
                     Render();
                     m_control.Refresh();
                     break;
@@ -38997,6 +39068,8 @@ void LoadSettings() {
     g_settings.islandAppName = LoadDualSwitch(L"appName");
     g_settings.islandMacIcons = LoadDualSwitch(L"macIcons");
     g_settings.islandCompact = Wh_GetIntValue(L"islandCompact", 0) != 0;
+    g_settings.islandBatteryPercent =
+        Wh_GetIntValue(L"batteryPercent", 1) != 0;
     g_settings.pillMaxWidth =
         std::clamp(Wh_GetIntSetting(L"pillMaxWidth"), 20, 100);
     g_compactGroups =
