@@ -827,6 +827,11 @@ apps, então o resto da parte de baixo da tela continua clicável), ou como ela
   $name:pt-BR: Fonte dos textos da ilha
   $description: The name of an installed font for the clock and the app's name, such as Inter (free, close to the macOS font). Empty for Segoe UI Variable, the Windows one
   $description:pt-BR: O nome de uma fonte instalada para o relógio e o nome do app, como a Inter (gratuita, parecida com a do macOS). Vazio para a Segoe UI Variable, a do Windows
+- pillMaxWidth: 50
+  $name: Pill's largest width (% of the screen)
+  $name:pt-BR: Largura máxima da pílula (% da tela)
+  $description: The pill is as wide as what it shows, up to this. Past it, the other apps' tray icons scroll (the mouse wheel), and the clock in the middle takes only the room left. 100 has no limit (20-100, default 50)
+  $description:pt-BR: A pílula tem a largura do que mostra, até este limite. Passando dele, os ícones dos outros apps rolam (roda do mouse), e o relógio no meio usa só o espaço que sobrar. 100 não tem limite (20-100, padrão 50)
 - trayListIcons: 12
   $name: Tray icons shown before the list scrolls
   $name:pt-BR: Ícones da bandeja mostrados antes de a lista rolar
@@ -1143,6 +1148,8 @@ struct {
     // The pill showing only some groups until the mouse is on it (see
     // g_compactGroups).
     bool islandCompact;
+    // The pill's largest width (or length, upright), in % of the screen.
+    int pillMaxWidth;
     // Panels opening out of the pill as wide as it, when it's wider than
     // them (otherwise they drop out of the clicked item, at their own width).
     bool islandPanelsFollow;
@@ -20350,6 +20357,10 @@ class Island {
     // The compact pill opened by the mouse on it (see islandCompact); it
     // closes a moment after the mouse leaves (see kCompactTimerId).
     bool m_compactOpen = false;
+    // The room the tray icons' list may take for the pill to stay within its
+    // largest width (see pillMaxWidth), from the last layout; -1 for no
+    // limit.
+    float m_trayListCap = -1;
     // The app in front, its name on the bar (see PillGroup::AppName), and
     // its menu (minimize, maximize, close, quit).
     std::wstring m_appName;
@@ -32976,6 +32987,8 @@ void Island::Layout() {
     float groupTo[kPillGroups];
     std::fill(std::begin(groupFrom), std::end(groupFrom), -1.0f);
     std::fill(std::begin(groupTo), std::end(groupTo), -1.0f);
+    // The tray icons' list's room now (see m_trayListCap).
+    float trayListShown = 0;
     // The groups of items, in the order chosen (see g_pillOrder), each
     // squeezed by how much it's shown.
     for (PillGroup group : g_pillOrder) {
@@ -33039,7 +33052,13 @@ void Island::Layout() {
                     const int fits =
                         std::max(1, std::min(g_trayListIcons,
                                              (int)(along * 0.6f / iconStep)));
-                    const float listMax = (fits + 0.5f) * iconStep;
+                    // No wider than leaves the pill within its largest width
+                    // (see m_trayListCap), at least an icon.
+                    float listMax = (fits + 0.5f) * iconStep;
+                    if (m_trayListCap >= 0) {
+                        listMax = std::min(
+                            listMax, std::max(iconStep, m_trayListCap));
+                    }
                     float listFull = 0;
                     for (const auto& icon : m_trayIcons) {
                         listFull +=
@@ -33059,6 +33078,7 @@ void Island::Layout() {
                     const float listStart = x;
                     const float listEnd =
                         listStart + std::min(listFull, listMax) * room;
+                    trayListShown = listEnd - listStart;
                     x = listStart - scroll * room;
                     // An icon being pinned shrinks out of the list as it grows
                     // among the pinned ones (and back when unpinned).
@@ -33423,9 +33443,28 @@ void Island::Layout() {
         addIcon(IslandItem::Minimize, {kGlyphCollapse}, true);
     }
     float contentWidth = x - spacing;
+    // The pill's largest width (see pillMaxWidth): what the tray icons' list
+    // may take next time, the rest being what it is (not for the bar, as
+    // wide as the screen).
+    float maxContent = -1;
+    if (!m_bar && g_settings.pillMaxWidth < 100) {
+        const float along =
+            (float)(m_vertical ? m_monitor.bottom - m_monitor.top
+                               : m_monitor.right - m_monitor.left);
+        maxContent = std::max(0.0f, along * g_settings.pillMaxWidth / 100.0f -
+                                        padding * 2);
+        const float cap = maxContent - (contentWidth - trayListShown);
+        if (std::fabs(cap - m_trayListCap) > 0.5f) {
+            m_trayListCap = cap;
+            // (Laid out again with it.)
+            StartAnimating();
+        }
+    } else {
+        m_trayListCap = -1;
+    }
     // The clock kept in the middle: the shorter side gets the room the other
     // one has more (so the pill grows on both sides alike as items come and
-    // go).
+    // go), as far as the largest width lets it.
     float clockMiddle = -1;
     for (const auto& slot : m_slots) {
         if (slot.item == IslandItem::Clock) {
@@ -33439,8 +33478,13 @@ void Island::Layout() {
     if (centered > 0.001f && clockMiddle >= 0 && !m_bar) {
         const float before = clockMiddle;
         const float after = contentWidth - clockMiddle;
+        // The room it may add (see pillMaxWidth).
+        const float roomLeft = maxContent >= 0
+                                   ? std::max(0.0f, maxContent - contentWidth)
+                                   : std::numeric_limits<float>::max();
         if (before < after) {
-            const float shift = (after - before) * centered;
+            const float shift =
+                std::min((after - before) * centered, roomLeft);
             for (auto& slot : m_slots) {
                 slot.rect.left += shift;
                 slot.rect.right += shift;
@@ -33448,7 +33492,7 @@ void Island::Layout() {
             clockMiddle += shift;
             contentWidth += shift;
         } else {
-            contentWidth += (before - after) * centered;
+            contentWidth += std::min((before - after) * centered, roomLeft);
         }
     }
     // The bar spread like the macOS menu bar: each end packed on its own (in
@@ -38889,6 +38933,8 @@ void LoadSettings() {
     g_settings.islandAppName = LoadDualSwitch(L"appName");
     g_settings.islandMacIcons = LoadDualSwitch(L"macIcons");
     g_settings.islandCompact = Wh_GetIntValue(L"islandCompact", 0) != 0;
+    g_settings.pillMaxWidth =
+        std::clamp(Wh_GetIntSetting(L"pillMaxWidth"), 20, 100);
     g_compactGroups =
         (unsigned)Wh_GetIntValue(L"compactGroups", 1 << (int)PillGroup::Usage);
     {
