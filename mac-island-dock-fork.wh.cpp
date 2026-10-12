@@ -20103,6 +20103,19 @@ struct BarMirror {
     SIZE size{};
     // For each of its columns, the island's column shown there, or -1.
     std::vector<int> columns;
+    // The same as runs of columns (`length` columns from `from` to `to`, or
+    // the one column `from` repeated), and what they were made for (the
+    // widths and the groups' columns), to make them again only on a change.
+    struct Run {
+        int to;
+        int from;
+        int length;
+        bool repeat;
+    };
+    std::vector<Run> runs;
+    std::vector<int> runsKey;
+    // Drawn clear last time: not drawn again while it stays clear.
+    bool drawnClear = false;
 };
 
 bool BarGroupOnLeft(PillGroup group);
@@ -31702,72 +31715,123 @@ void Island::ComposeMirrors() {
             }
             mirror.oldBitmap = SelectObject(mirror.dc, mirror.bitmap);
             mirror.size = size;
+            mirror.drawnClear = false;
         }
-        BYTE* bits = (BYTE*)mirror.bits;
-        memset(bits, 0, (size_t)size.cx * size.cy * 4);
-        mirror.columns.assign(mirrorWidth, -1);
+        // The island's height changed (another scaling): its strip follows.
+        if (mirror.reserved != height) {
+            SetMirrorAppBar(mirror, height);
+        }
         const bool clear = !source || width <= 0 || !m_bar ||
                            mirror.fullscreen ||
                            mirror.monitor == m_monitorHandle;
-        if (!clear) {
-            if (mirrorWidth == width) {
-                for (int x = 0; x < width; x++) {
-                    mirror.columns[x] = x;
-                }
-            } else {
-                std::vector<bool> covered(width, false);
-                for (int i = 0; i < 3; i++) {
-                    if (!m_barZoneUsed[i]) {
-                        continue;
-                    }
-                    const int from = std::clamp(
+        // Clear, as it already is: nothing to draw.
+        if (clear && mirror.drawnClear) {
+            continue;
+        }
+        mirror.drawnClear = clear;
+        BYTE* bits = (BYTE*)mirror.bits;
+        memset(bits, 0, (size_t)size.cx * size.cy * 4);
+        if (clear) {
+            // No items on it for the mouse (see HandleMirrorMessage).
+            mirror.columns.assign(mirrorWidth, -1);
+            mirror.runs.clear();
+            mirror.runsKey.clear();
+        } else {
+            // Where each group's columns go (made again only when the widths
+            // or the groups' places change).
+            int zoneFrom[3] = {};
+            int zoneTo[3] = {};
+            std::vector<int> key = {width, mirrorWidth,
+                                    g_settings.islandBarPills ? 1 : 0};
+            for (int i = 0; i < 3; i++) {
+                if (m_barZoneUsed[i]) {
+                    zoneFrom[i] = std::clamp(
                         (int)std::floor(m_barZones[i].left) - side, 0, width);
-                    const int to = std::clamp(
+                    zoneTo[i] = std::clamp(
                         (int)std::ceil(m_barZones[i].right) + side, 0, width);
-                    const int offset = i == 0   ? 0
-                                       : i == 1 ? (mirrorWidth - width) / 2
-                                                : mirrorWidth - width;
-                    for (int x = from; x < to; x++) {
-                        covered[x] = true;
-                        const int at = x + offset;
-                        if (at >= 0 && at < mirrorWidth &&
-                            mirror.columns[at] < 0) {
-                            mirror.columns[at] = x;
-                        }
-                    }
                 }
-                // A bar filled from edge to edge: the room between the groups
-                // filled like the island's.
-                if (!g_settings.islandBarPills) {
-                    int gap = -1;
-                    for (int x = 0; x < width && gap < 0; x++) {
-                        if (!covered[x]) {
-                            gap = x;
-                        }
+                key.push_back(zoneFrom[i]);
+                key.push_back(zoneTo[i]);
+            }
+            if (key != mirror.runsKey) {
+                mirror.runsKey = std::move(key);
+                mirror.columns.assign(mirrorWidth, -1);
+                if (mirrorWidth == width) {
+                    for (int x = 0; x < width; x++) {
+                        mirror.columns[x] = x;
                     }
-                    if (gap >= 0) {
-                        for (int& column : mirror.columns) {
-                            if (column < 0) {
-                                column = gap;
+                } else {
+                    std::vector<bool> covered(width, false);
+                    for (int i = 0; i < 3; i++) {
+                        const int offset = i == 0   ? 0
+                                           : i == 1 ? (mirrorWidth - width) / 2
+                                                    : mirrorWidth - width;
+                        for (int x = zoneFrom[i]; x < zoneTo[i]; x++) {
+                            covered[x] = true;
+                            const int at = x + offset;
+                            if (at >= 0 && at < mirrorWidth &&
+                                mirror.columns[at] < 0) {
+                                mirror.columns[at] = x;
                             }
                         }
                     }
+                    // A bar filled from edge to edge: the room between the
+                    // groups filled like the island's.
+                    if (!g_settings.islandBarPills) {
+                        int gap = -1;
+                        for (int x = 0; x < width && gap < 0; x++) {
+                            if (!covered[x]) {
+                                gap = x;
+                            }
+                        }
+                        if (gap >= 0) {
+                            for (int& column : mirror.columns) {
+                                if (column < 0) {
+                                    column = gap;
+                                }
+                            }
+                        }
+                    }
+                }
+                // As runs: columns in a row copied at once, a column repeated
+                // (the filled room) filled at once.
+                mirror.runs.clear();
+                for (int x = 0; x < mirrorWidth;) {
+                    const int column = mirror.columns[x];
+                    if (column < 0) {
+                        x++;
+                        continue;
+                    }
+                    int length = 1;
+                    while (x + length < mirrorWidth &&
+                           mirror.columns[x + length] == column + length) {
+                        length++;
+                    }
+                    bool repeat = false;
+                    if (length == 1) {
+                        while (x + length < mirrorWidth &&
+                               mirror.columns[x + length] == column) {
+                            length++;
+                        }
+                        repeat = length > 1;
+                    }
+                    mirror.runs.push_back({x, column, length, repeat});
+                    x += length;
                 }
             }
             for (int y = 0; y < height && y < sourceSize.cy; y++) {
                 const DWORD* from = (const DWORD*)(source + (size_t)y * width * 4);
                 DWORD* to = (DWORD*)(bits + (size_t)y * mirrorWidth * 4);
-                for (int x = 0; x < mirrorWidth; x++) {
-                    const int column = mirror.columns[x];
-                    if (column >= 0) {
-                        to[x] = from[column];
+                for (const auto& run : mirror.runs) {
+                    if (run.repeat) {
+                        std::fill(to + run.to, to + run.to + run.length,
+                                  from[run.from]);
+                    } else {
+                        memcpy(to + run.to, from + run.from,
+                               (size_t)run.length * 4);
                     }
                 }
             }
-        }
-        // The island's height changed (another scaling): its strip follows.
-        if (mirror.reserved != height) {
-            SetMirrorAppBar(mirror, height);
         }
         POINT position{mirror.rect.left, mirror.rect.top};
         POINT origin{0, 0};
