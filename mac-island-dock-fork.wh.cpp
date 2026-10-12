@@ -3078,6 +3078,99 @@ void ResetAppsArea() {
     g_appsAreaRight = 0;
 }
 
+// The docks on the other monitors (their taskbars have no magnification, so
+// no rendering to follow): their windows cut to the dock too, as their
+// background's size changes (an app opening or closing). Taskbar thread.
+struct SecondaryDock {
+    HWND hWnd;
+    winrt::weak_ref<FrameworkElement> background;
+    FrameworkElement::SizeChanged_revoker revoker;
+    RECT region;
+};
+std::vector<SecondaryDock> g_secondaryDocks;
+
+// Sets the window's region to `region` unless it's already that (Windows
+// sometimes drops it).
+void SetRegionIfChanged(HWND hWnd, const RECT& region) {
+    RECT current{};
+    const int kind = GetWindowRgnBox(hWnd, &current);
+    if (kind != ERROR && kind != NULLREGION && EqualRect(&current, &region)) {
+        return;
+    }
+    if (HRGN handle = CreateRectRgnIndirect(&region)) {
+        // The system owns the region once it's set.
+        if (!SetWindowRgn(hWnd, handle, TRUE)) {
+            DeleteObject(handle);
+        }
+    }
+}
+
+void UpdateSecondaryDockRegion(SecondaryDock& dock) {
+    auto background = dock.background.get();
+    RECT window{};
+    if (!background || !GetWindowRect(dock.hWnd, &window) ||
+        background.ActualWidth() <= 0) {
+        return;
+    }
+    const auto bounds = background.TransformToVisual(nullptr).TransformBounds(
+        {0, 0, (float)background.ActualWidth(),
+         (float)background.ActualHeight()});
+    const double scale = GetDpiForWindow(dock.hWnd) / 96.0;
+    RECT region{(LONG)std::floor((bounds.X - kAppsAreaMargin) * scale), 0,
+                (LONG)std::ceil((bounds.X + bounds.Width + kAppsAreaMargin) *
+                                scale),
+                window.bottom - window.top};
+    region.left = std::max(region.left, 0L);
+    region.right = std::min(region.right, window.right - window.left);
+    if (region.right <= region.left) {
+        return;
+    }
+    dock.region = region;
+    SetRegionIfChanged(dock.hWnd, region);
+}
+
+void WatchSecondaryDock(HWND hWnd, FrameworkElement const& background) {
+    for (auto& dock : g_secondaryDocks) {
+        if (dock.hWnd == hWnd) {
+            dock.background = winrt::make_weak(background);
+            dock.revoker = background.SizeChanged(
+                winrt::auto_revoke, [hWnd](auto const&, auto const&) {
+                    Safely(L"Cutting a dock's window", [&] {
+                        for (auto& entry : g_secondaryDocks) {
+                            if (entry.hWnd == hWnd) {
+                                UpdateSecondaryDockRegion(entry);
+                            }
+                        }
+                    });
+                });
+            UpdateSecondaryDockRegion(dock);
+            return;
+        }
+    }
+    g_secondaryDocks.push_back({hWnd, nullptr, {}, {}});
+    WatchSecondaryDock(hWnd, background);
+}
+
+// After a slide (from the tray's thread, so without XAML): the region again,
+// if Windows dropped it.
+void KeepSecondaryDockRegion(HWND hWnd) {
+    for (const auto& dock : g_secondaryDocks) {
+        if (dock.hWnd == hWnd && dock.region.right > dock.region.left) {
+            SetRegionIfChanged(hWnd, dock.region);
+        }
+    }
+}
+
+void ResetSecondaryDocks() {
+    for (auto& dock : g_secondaryDocks) {
+        dock.revoker.revoke();
+        if (IsWindow(dock.hWnd)) {
+            SetWindowRgn(dock.hWnd, nullptr, TRUE);
+        }
+    }
+    g_secondaryDocks.clear();
+}
+
 void OnRenderingUnsafe();
 
 void OnRendering(winrt::Windows::Foundation::IInspectable const&,
@@ -3499,6 +3592,7 @@ void ResetDockBehavior() {
     g_shadowVisual = nullptr;
     g_shadowFill = nullptr;
     ResetAppsArea();
+    ResetSecondaryDocks();
     g_dockItemCount = -1;
     g_dockWnd = nullptr;
 }
@@ -3631,9 +3725,12 @@ bool ApplyStyle(XamlRoot xamlRoot, HWND hWnd, bool mainTaskbar) {
         }
     }
 
-    // Magnification and bouncing follow the mouse on the main taskbar.
+    // Magnification and bouncing follow the mouse on the main taskbar. The
+    // others are only cut to their dock.
     if (mainTaskbar) {
         SetupDockBehavior(hWnd, frame, dockBackground);
+    } else if (dockBackground) {
+        WatchSecondaryDock(hWnd, dockBackground);
     }
     return true;
 }
@@ -3736,6 +3833,7 @@ void FreeXamlGlobals() {
         g_stateRevokers);
     std::vector<FrameworkElement::SizeChanged_revoker>().swap(g_dotRevokers);
     std::vector<BadgeWatch>().swap(g_badgeWatches);
+    std::vector<SecondaryDock>().swap(g_secondaryDocks);
     g_layoutRevoker = {};
     g_renderingRevoker = {};
 }
@@ -4052,6 +4150,9 @@ void WINAPI TrayUI_SlideWindow_Hook(void* pThis,
             hWnd == g_dockWnd && g_appsRight > g_appsLeft) {
             UpdateAppsArea(g_appsLeft, g_appsRight, false);
         }
+        if (!g_unloading && IsDock() && hWnd != g_dockWnd) {
+            KeepSecondaryDockRegion(hWnd);
+        }
         return;
     }
 
@@ -4066,6 +4167,9 @@ void WINAPI TrayUI_SlideWindow_Hook(void* pThis,
     if ((IsTransparentTaskbar() || IsDock()) && hWnd == g_dockWnd &&
         g_appsRight > g_appsLeft) {
         UpdateAppsArea(g_appsLeft, g_appsRight, false);
+    }
+    if (IsDock() && hWnd != g_dockWnd) {
+        KeepSecondaryDockRegion(hWnd);
     }
 }
 
