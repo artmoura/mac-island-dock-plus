@@ -3126,6 +3126,9 @@ void OnRenderingUnsafe() {
     // The dock background's edges: the icons rest on its middle line.
     double dockTop = 0;
     double dockBottom = clientHeight;
+    // And its sides, for the window's region (see UpdateAppsArea).
+    double dockLeft = 0;
+    double dockRight = 0;
     if (auto background = g_dockBackground.get()) {
         const auto bounds =
             background.TransformToVisual(nullptr).TransformBounds(
@@ -3133,6 +3136,8 @@ void OnRenderingUnsafe() {
                  (float)background.ActualHeight()});
         dockTop = bounds.Y;
         dockBottom = bounds.Y + bounds.Height;
+        dockLeft = bounds.X;
+        dockRight = bounds.X + bounds.Width;
     }
     const double dockMiddle =
         (dockTop + dockBottom) / 2 + g_settings.iconOffset;
@@ -3242,6 +3247,14 @@ void OnRenderingUnsafe() {
 
     if (IsTransparentTaskbar() && !placed.empty()) {
         UpdateAppsArea(left, right, true);
+    }
+    // The dock: the taskbar's window only where the dock is (with room for
+    // the magnified icons), so the mouse goes through the rest of the bottom
+    // of the screen to the windows there.
+    if (IsDock() && !placed.empty()) {
+        UpdateAppsArea(dockRight > dockLeft ? std::min(left, dockLeft) : left,
+                       dockRight > dockLeft ? std::max(right, dockRight) : right,
+                       false);
     }
 
     // The transparent taskbar's shadow: stronger over light windows, and
@@ -3890,9 +3903,29 @@ bool UserIsReachingForTaskbar(HWND hWnd) {
     if (PtInRect(&rect, pt)) {
         return true;
     }
+    // At the bottom edge of this taskbar's monitor (monitors side by side
+    // share the height of their bottom edge).
+    const HMONITOR monitor = MonitorFromWindow(hWnd, MONITOR_DEFAULTTONEAREST);
     MONITORINFO info{sizeof(info)};
-    return GetMonitorInfo(MonitorFromWindow(hWnd, MONITOR_DEFAULTTONEAREST),
-                          &info) &&
+    return GetMonitorInfo(monitor, &info) &&
+           MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST) == monitor &&
+           pt.y >= info.rcMonitor.bottom - 2;
+}
+
+// The mouse at the bottom edge of another monitor than `monitor` (and the
+// Windows key not held): the user reaches for that monitor's dock, so this
+// one stays hidden (Windows shows every taskbar together otherwise).
+bool MouseAtAnotherMonitorsEdge(HMONITOR monitor) {
+    if ((GetAsyncKeyState(VK_LWIN) | GetAsyncKeyState(VK_RWIN)) & 0x8000) {
+        return false;
+    }
+    POINT pt;
+    if (!monitor || !GetCursorPos(&pt)) {
+        return false;
+    }
+    const HMONITOR mouse = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO info{sizeof(info)};
+    return mouse != monitor && GetMonitorInfo(mouse, &info) &&
            pt.y >= info.rcMonitor.bottom - 2;
 }
 
@@ -3985,6 +4018,14 @@ void WINAPI TrayUI_SlideWindow_Hook(void* pThis,
         return;
     }
 
+    // Only the dock on the monitor with the mouse comes up.
+    if (show && !g_unloading && IsDock() &&
+        MouseAtAnotherMonitorsEdge(monitor)) {
+        Wh_Log(L"Not showing the dock of a monitor without the mouse");
+        PostMessage(hWnd, WM_TIMER, kHideTimerId, 0);
+        return;
+    }
+
     if (hWnd == g_dockWnd) {
         g_trayShown = show;
         // The taskbar takes over from a dock shown for a notification.
@@ -4007,8 +4048,8 @@ void WINAPI TrayUI_SlideWindow_Hook(void* pThis,
 
     if (!animate || g_unloading) {
         TrayUI_SlideWindow_Original(pThis, hWnd, rect, monitor, show, animate);
-        if (!g_unloading && IsTransparentTaskbar() && hWnd == g_dockWnd &&
-            g_appsRight > g_appsLeft) {
+        if (!g_unloading && (IsTransparentTaskbar() || IsDock()) &&
+            hWnd == g_dockWnd && g_appsRight > g_appsLeft) {
             UpdateAppsArea(g_appsLeft, g_appsRight, false);
         }
         return;
@@ -4022,7 +4063,7 @@ void WINAPI TrayUI_SlideWindow_Hook(void* pThis,
             show);
     TrayUI_SlideWindow_Original(pThis, hWnd, rect, monitor, show, false);
     // Still cut down to its apps.
-    if (IsTransparentTaskbar() && hWnd == g_dockWnd &&
+    if ((IsTransparentTaskbar() || IsDock()) && hWnd == g_dockWnd &&
         g_appsRight > g_appsLeft) {
         UpdateAppsArea(g_appsLeft, g_appsRight, false);
     }
