@@ -1,2 +1,5 @@
 compile.log
 *.log
+Inter-4.1/
+tools/*.exe
+edgelog.txt

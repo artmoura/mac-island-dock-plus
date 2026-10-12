@@ -1218,7 +1218,13 @@ D2D1_COLOR_F Bg(float alpha) {
 
 // The themes, in the order the island's settings show them.
 enum class ThemeId { Black, Graphite, Light, Accent, Glass, Count };
+// The theme shown now: the one chosen, or, following Windows' light and dark
+// mode, the one chosen for each ("islandTheme" is then the light one's).
 int g_themeIndex;
+bool g_themeFollow;
+int g_themeLight;
+int g_themeDark;
+bool IsDarkMode();
 
 double NowSeconds();
 
@@ -1389,8 +1395,12 @@ bool SpringDecoration(double& value, double& velocity, double target,
 // Reads the chosen theme. Chosen in the island, the colors blend into it (see
 // StepTheme); otherwise, they're there right away.
 void LoadTheme(bool blend = false) {
-    g_themeIndex =
+    g_themeLight =
         std::clamp(Wh_GetIntValue(L"islandTheme", 0), 0, (int)ThemeId::Count - 1);
+    g_themeDark = std::clamp(Wh_GetIntValue(L"islandThemeDark", 0), 0,
+                             (int)ThemeId::Count - 1);
+    g_themeFollow = Wh_GetIntValue(L"islandThemeFollow", 0) != 0;
+    g_themeIndex = g_themeFollow && IsDarkMode() ? g_themeDark : g_themeLight;
     const ThemeId theme = (ThemeId)g_themeIndex;
     IslandTheme& target = g_themeTarget;
     target = {};
@@ -10857,6 +10867,8 @@ enum class IslandPref {
     BarAllMonitors,
     AppName,
     MacIcons,
+    // The colors following Windows' light and dark mode (see LoadTheme).
+    ThemeFollow,
 };
 
 struct IslandPrefInfo {
@@ -10958,6 +10970,9 @@ const IslandPrefInfo kIslandPrefs[] = {
     {IslandPref::MacIcons, nullptr, 0xE734,
      L"macOS-style Wi-Fi, volume and battery icons",
      L"Ícones de Wi-Fi, volume e bateria estilo macOS"},
+    {IslandPref::ThemeFollow, L"islandThemeFollow", 0xE706,
+     L"Colors follow Windows' light and dark mode",
+     L"Cores seguem o modo claro e escuro do Windows"},
 };
 
 // The groups of items on the pill, which can be put in another order in the
@@ -12485,7 +12500,10 @@ class ControlPanel : public Panel {
     D2D1_POINT_2F m_dragGrab{};
     winrt::com_ptr<IDWriteTextFormat> m_badgeFormat;
     // The island's settings view.
-    D2D1_RECT_F m_styleRow{}, m_themeRow{};
+    D2D1_RECT_F m_styleRow{};
+    // The colors' rows: the colors (the light mode's, following Windows'
+    // mode) and the dark mode's.
+    D2D1_RECT_F m_themeRow[2]{};
     // The place for all apps (a little screen with its 9 ready places), and
     // the places per app.
     D2D1_RECT_F m_placeRow{}, m_placeGrid{}, m_appPlacesRow{};
@@ -12606,7 +12624,7 @@ class ControlPanel : public Panel {
                        float opacity);
     void DrawAppPlaces(ID2D1RenderTarget* target, ID2D1SolidColorBrush* brush);
     D2D1_RECT_F m_styleSegments[2]{};
-    D2D1_RECT_F m_swatches[(int)ThemeId::Count]{};
+    D2D1_RECT_F m_swatches[2][(int)ThemeId::Count]{};
     double m_styleKnob = -1;
     double m_styleKnobVelocity = 0;
     // The switches' knobs, by key.
@@ -22171,8 +22189,8 @@ std::wstring ControlPanel::SettingText(const SettingEntry& entry) const {
             break;
         case SettingKind::Theme:
             text +=
-                L" Colors theme black graphite light accent glass Cores tema "
-                L"preto grafite claro destaque vidro";
+                L" Colors theme black graphite light accent glass dark mode "
+                L"Cores tema preto grafite claro destaque vidro modo escuro";
             break;
         case SettingKind::Size:
             text += entry.value == 3
@@ -22283,7 +22301,11 @@ void ControlPanel::LayoutSettings() {
             {(int)SettingKind::Pref, (int)IslandPref::BarPills, kSectionLook},
             {(int)SettingKind::Pref, (int)IslandPref::BarAllMonitors,
              kSectionLook},
+            {(int)SettingKind::Pref, (int)IslandPref::ThemeFollow,
+             kSectionLook},
+            // The colors, and the ones for the dark mode (see LoadTheme).
             {(int)SettingKind::Theme, 0, kSectionLook},
+            {(int)SettingKind::Theme, 1, kSectionLook},
             {(int)SettingKind::Pref, (int)IslandPref::MacIcons, kSectionLook},
             {(int)SettingKind::Size, 0, kSectionLook},
             {(int)SettingKind::Pref, (int)IslandPref::PanelsFollow,
@@ -22408,6 +22430,11 @@ void ControlPanel::LayoutSettings() {
         }
         entry.shown =
             m_search.empty() || MatchesSearch(SettingText(entry), m_search);
+        // The dark mode's colors only while following Windows' mode.
+        if (entry.kind == SettingKind::Theme && entry.value == 1 &&
+            !g_themeFollow) {
+            entry.shown = false;
+        }
         sectionShown[entry.section] |= entry.shown;
     }
     float sectionHeight[kSectionCount] = {};
@@ -22465,14 +22492,16 @@ void ControlPanel::LayoutSettings() {
                 break;
             }
             case SettingKind::Theme: {
-                m_themeRow = rect;
+                const int row = std::clamp(entry.value, 0, 1);
+                m_themeRow[row] = rect;
                 const float swatch = std::round(22 * s);
                 const float swatchGap = std::round(8 * s);
                 float swatchRight = rect.right - std::round(6 * s);
                 const float middle = top + height / 2;
                 for (int i = (int)ThemeId::Count - 1; i >= 0; i--) {
-                    m_swatches[i] = {swatchRight - swatch, middle - swatch / 2,
-                                     swatchRight, middle + swatch / 2};
+                    m_swatches[row][i] = {swatchRight - swatch,
+                                          middle - swatch / 2, swatchRight,
+                                          middle + swatch / 2};
                     swatchRight -= swatch + swatchGap;
                 }
                 break;
@@ -22743,13 +22772,16 @@ ControlPanel::Hit ControlPanel::HitTest(POINT pt) const {
                     }
                     break;
                 case SettingKind::Theme: {
+                    // (The index tells the row too: row * count + swatch.)
+                    const int row = std::clamp(entry.value, 0, 1);
                     const float grow = std::round(3 * m_scale);
                     for (int i = 0; i < (int)ThemeId::Count; i++) {
-                        const D2D1_RECT_F& r = m_swatches[i];
+                        const D2D1_RECT_F& r = m_swatches[row][i];
                         if (PointInRect(list,
                                         {r.left - grow, r.top - grow,
                                          r.right + grow, r.bottom + grow})) {
-                            return {Part::ThemeSwatch, i};
+                            return {Part::ThemeSwatch,
+                                    row * (int)ThemeId::Count + i};
                         }
                     }
                     break;
@@ -24041,21 +24073,30 @@ void ControlPanel::DrawSettingEntry(ID2D1RenderTarget* target,
             break;
         case SettingKind::Theme:
             // The colors: a swatch each, the chosen one ringed in blue.
+            // Following Windows' mode: one row for its light mode, one for
+            // its dark mode (see LoadTheme).
             {
+                const int row = std::clamp(entry.value, 0, 1);
+                const int chosenTheme = row == 1 ? g_themeDark : g_themeLight;
                 const IslandPrefInfo& info =
                     kIslandPrefs[(int)IslandPref::Theme];
+                const std::wstring title =
+                    !g_themeFollow ? Tr(info.english, info.portuguese)
+                    : row == 0
+                        ? Tr(L"Colors in light mode", L"Cores no modo claro")
+                        : Tr(L"Colors in dark mode", L"Cores no modo escuro");
                 const std::wstring name =
-                    std::wstring(Tr(info.english, info.portuguese)) +
-                    L" \u00B7 " + ThemeName(g_themeIndex);
-                label(m_themeRow, info.glyph, name.c_str(), m_swatches[0].left,
-                      1);
+                    title + L" \u00B7 " + ThemeName(chosenTheme);
+                label(m_themeRow[row], row == 1 ? (WCHAR)0xE708 : info.glyph,
+                      name.c_str(), m_swatches[row][0].left, 1);
                 for (int i = 0; i < (int)ThemeId::Count; i++) {
-                    const D2D1_RECT_F& r = m_swatches[i];
+                    const D2D1_RECT_F& r = m_swatches[row][i];
                     const D2D1_POINT_2F center{(r.left + r.right) / 2,
                                                (r.top + r.bottom) / 2};
                     const float radius = (r.right - r.left) / 2;
                     const bool hover =
-                        m_hover.part == Part::ThemeSwatch && m_hover.index == i;
+                        m_hover.part == Part::ThemeSwatch &&
+                        m_hover.index == row * (int)ThemeId::Count + i;
                     const float grow = std::round(1.5f * s) * Hover(r, hover);
                     brush->SetColor(ThemeSwatchColor(i));
                     target->FillEllipse({center, radius + grow, radius + grow},
@@ -24063,7 +24104,7 @@ void ControlPanel::DrawSettingEntry(ID2D1RenderTarget* target,
                     brush->SetColor(Fg(0.3f));
                     target->DrawEllipse({center, radius + grow, radius + grow},
                                         brush, 1);
-                    if (i == g_themeIndex) {
+                    if (i == chosenTheme) {
                         brush->SetColor(D2D1::ColorF(0.04f, 0.52f, 1.0f, 1));
                         target->DrawEllipse(
                             {center, radius + std::round(3.5f * s),
@@ -25681,6 +25722,10 @@ bool ControlPanel::OnMouseUp(POINT pt) {
         case Part::SettingToggle: {
             const IslandPref pref = (IslandPref)hit.index;
             SetIslandPref(pref, GetIslandPref(pref) ? 0 : 1);
+            // The dark mode's colors come or go under it.
+            if (pref == IslandPref::ThemeFollow) {
+                Layout();
+            }
             return true;
         }
         case Part::SizeReset:
@@ -25780,9 +25825,22 @@ bool ControlPanel::OnMouseUp(POINT pt) {
                 Layout();
             }
             return true;
-        case Part::ThemeSwatch:
-            SetIslandPref(IslandPref::Theme, hit.index);
+        case Part::ThemeSwatch: {
+            const int row = hit.index / (int)ThemeId::Count;
+            const int theme = hit.index % (int)ThemeId::Count;
+            if (row == 0) {
+                SetIslandPref(IslandPref::Theme, theme);
+            } else {
+                // The dark mode's colors (shown now if Windows is dark).
+                Wh_SetIntValue(L"islandThemeDark", theme);
+                LoadTheme(true);
+                StartIslandAnimation();
+                if (g_island) {
+                    g_island->OnPreferencesChanged();
+                }
+            }
             return true;
+        }
         case Part::HotspotToggle:
             m_hotspot = m_hotspot == 1 ? 0 : 1;
             SwitchRadio(2, m_hotspot == 1);
@@ -29564,6 +29622,8 @@ int GetIslandPref(IslandPref pref) {
             return g_settings.islandAppName;
         case IslandPref::MacIcons:
             return g_settings.islandMacIcons;
+        case IslandPref::ThemeFollow:
+            return g_themeFollow;
     }
     return 0;
 }
@@ -29797,6 +29857,11 @@ void SetIslandPref(IslandPref pref, int value) {
         case IslandPref::MacIcons:
             g_settings.islandMacIcons = on;
             SaveDualSwitch(L"macIcons", on);
+            break;
+        case IslandPref::ThemeFollow:
+            // (Kept above; the colors for the mode Windows is in now.)
+            LoadTheme(true);
+            StartIslandAnimation();
             break;
     }
     if (g_island) {
@@ -37801,6 +37866,11 @@ LRESULT Island::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam,
                 wcscmp((PCWSTR)lParam, L"ImmersiveColorSet") == 0 &&
                 IsDarkMode() != m_darkMode) {
                 m_darkMode = !m_darkMode;
+                // The colors chosen for that mode, blending in.
+                if (g_themeFollow) {
+                    LoadTheme(true);
+                    StartIslandAnimation();
+                }
                 StartAnimating();
             }
             break;
