@@ -6414,6 +6414,97 @@ void OpenApp(const std::wstring& appId) {
                  SW_SHOWNORMAL);
 }
 
+// Looking for the window playing some media: the app's windows, by its ID or
+// its program's file name (media apps without an ID of their own give
+// "Spotify.exe"), the one whose title has the media's title first (a
+// browser's window shows its tab's title).
+struct MediaWindowSearch {
+    const std::wstring* appId;
+    const std::wstring* title;
+    HWND titled;
+    HWND any;
+};
+
+BOOL CALLBACK FindMediaWindowProc(HWND hWnd, LPARAM lParam) {
+    auto* context = reinterpret_cast<MediaWindowSearch*>(lParam);
+    if (!IsWindowVisible(hWnd) || GetWindow(hWnd, GW_OWNER) ||
+        (GetWindowLongPtr(hWnd, GWL_EXSTYLE) & WS_EX_TOOLWINDOW)) {
+        return TRUE;
+    }
+    bool matches = WindowMatchesApp(hWnd, *context->appId);
+    if (!matches) {
+        DWORD processId = 0;
+        GetWindowThreadProcessId(hWnd, &processId);
+        if (HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,
+                                         FALSE, processId)) {
+            WCHAR path[MAX_PATH];
+            DWORD length = ARRAYSIZE(path);
+            if (QueryFullProcessImageName(process, 0, path, &length)) {
+                // "chrome.exe", or "chrome" for the ID "Chrome".
+                std::wstring file = PathFindFileName(path);
+                std::wstring stem = file;
+                if (stem.size() > 4 &&
+                    _wcsicmp(stem.c_str() + stem.size() - 4, L".exe") == 0) {
+                    stem.resize(stem.size() - 4);
+                }
+                // An ID like "Chrome.UserData.Default": its first part.
+                std::wstring idStem = *context->appId;
+                if (const size_t slash = idStem.find_last_of(L'\\');
+                    slash != std::wstring::npos) {
+                    idStem = idStem.substr(slash + 1);
+                }
+                if (idStem.size() > 4 &&
+                    _wcsicmp(idStem.c_str() + idStem.size() - 4, L".exe") == 0) {
+                    idStem.resize(idStem.size() - 4);
+                }
+                if (const size_t dot = idStem.find(L'.');
+                    dot != std::wstring::npos) {
+                    idStem.resize(dot);
+                }
+                matches = _wcsicmp(file.c_str(), context->appId->c_str()) == 0 ||
+                          (!idStem.empty() &&
+                           _wcsicmp(stem.c_str(), idStem.c_str()) == 0);
+            }
+            CloseHandle(process);
+        }
+    }
+    if (!matches) {
+        return TRUE;
+    }
+    if (!context->any) {
+        context->any = hWnd;
+    }
+    if (!context->title->empty()) {
+        WCHAR text[512] = L"";
+        GetWindowText(hWnd, text, ARRAYSIZE(text));
+        if (FindNLSStringEx(LOCALE_NAME_USER_DEFAULT,
+                            FIND_FROMSTART | LINGUISTIC_IGNORECASE, text, -1,
+                            context->title->c_str(),
+                            (int)context->title->size(), nullptr, nullptr,
+                            nullptr, 0) >= 0) {
+            context->titled = hWnd;
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+// Brings the app playing some media to the front: its window with the
+// media's title (the browser's tab playing, if it's the one shown), or its
+// window in front of the others, or the app is started.
+void GoToMediaApp(const std::wstring& appId, const std::wstring& title) {
+    if (appId.empty()) {
+        return;
+    }
+    MediaWindowSearch context{&appId, &title, nullptr, nullptr};
+    EnumWindows(FindMediaWindowProc, (LPARAM)&context);
+    if (HWND window = context.titled ? context.titled : context.any) {
+        ActivateApp(window);
+        return;
+    }
+    OpenApp(appId);
+}
+
 LRESULT CALLBACK AttentionWndProc(HWND hWnd,
                                   UINT uMsg,
                                   WPARAM wParam,
@@ -13740,6 +13831,8 @@ class MediaPanel : public Panel {
         PillButtons,
         PillTitle,
         Source,
+        // The cover and the song: brings the app playing to the front.
+        GoTo,
     };
     // With several apps with media: "Automatic" (Windows' choice) and each
     // app, to choose which one is controlled; the one under the mouse.
@@ -13789,6 +13882,8 @@ class MediaPanel : public Panel {
     float m_preparedScale = 0;
     D2D1_RECT_F m_cover{}, m_timeline{}, m_previous{}, m_playPause{}, m_next{},
         m_volume{}, m_volumeIcon{}, m_pillButtons{}, m_pillTitle{};
+    // The cover with the song, the artist and the app (see Part::GoTo).
+    D2D1_RECT_F m_goTo{};
     Part m_hover = Part::None;
     // Dragging the timeline (to a position) or the volume.
     Part m_dragging = Part::None;
@@ -29381,6 +29476,11 @@ void MediaPanel::Layout() {
     }
     const float cover = std::round(64 * s);
     m_cover = {padding, y, padding + cover, y + cover};
+    {
+        const float around = std::round(6 * s);
+        m_goTo = {padding - around, y - around, width - padding + around,
+                  y + cover + around};
+    }
     y += cover + std::round(14 * s);
     // The timeline, when the app says how long it is.
     if (m_state.duration > 0) {
@@ -29447,6 +29547,10 @@ MediaPanel::Part MediaPanel::HitTest(POINT pt) const {
     }
     if (around(m_volume)) {
         return Part::Volume;
+    }
+    if (m_state.present && !m_state.appId.empty() &&
+        PointInRect(pt, m_goTo)) {
+        return Part::GoTo;
     }
     return Part::None;
 }
@@ -29544,6 +29648,15 @@ void MediaPanel::Draw(ID2D1RenderTarget* target, ID2D1SolidColorBrush* brush) {
                          brush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
     }
 
+    // Under the mouse, the cover and the song light up: a click goes to the
+    // app playing.
+    const bool goToHover = m_hover == Part::GoTo;
+    if (const float lit = Hover(m_goTo, goToHover); lit > 0.01f) {
+        const float goToRadius = std::round(14 * s);
+        brush->SetColor(Fg(0.08f * lit));
+        target->FillRoundedRectangle({m_goTo, goToRadius, goToRadius}, brush);
+    }
+
     // The cover (or a note), rounded.
     const float radius = std::round(10 * s);
     if (ID2D1Bitmap* cover = Thumbnail(target)) {
@@ -29595,8 +29708,15 @@ void MediaPanel::Draw(ID2D1RenderTarget* target, ID2D1SolidColorBrush* brush) {
                      m_textFormat.get(),
                      {textLeft, textTop, textRight, textTop + line}, brush);
     textTop += line;
-    const std::wstring app = AppDisplayName(m_state.appId);
-    brush->SetColor(Fg(0.4f));
+    // The app, with an arrow to go to it (in words under the mouse).
+    const std::wstring appName = AppDisplayName(m_state.appId);
+    const std::wstring app =
+        !m_state.present || appName.empty() ? appName
+        : goToHover ? std::wstring(Tr(L"Go to ", L"Ir para ")) + appName +
+                          L" ↗"
+                    : appName + L" ↗";
+    brush->SetColor(goToHover ? D2D1::ColorF(0.04f, 0.52f, 1.0f, 1)
+                              : Fg(0.4f));
     target->DrawText(app.c_str(), (UINT32)app.size(), m_timeFormat.get(),
                      {textLeft, textTop, textRight, textTop + line}, brush);
 
@@ -29852,6 +29972,10 @@ bool MediaPanel::OnMouseUp(POINT pt) {
         case Part::Source:
             // 0 is "Automatic", then each app.
             ChooseMediaSource(m_state, SourceAt(pt) - 1);
+            return true;
+        case Part::GoTo:
+            GoToMediaApp(m_state.appId, m_state.title);
+            Close();
             return true;
         case Part::PillButtons:
             SetIslandPref(IslandPref::MediaButtons, !g_mediaButtonsInPill);
