@@ -3365,8 +3365,12 @@ void OnRenderingUnsafe() {
         UpdateAppsArea(left, right, true);
     }
     // (The dock's window is cut to it by WatchSecondaryDock, for every dock.)
+    // Windows sometimes drops a taskbar's region as it shows it: made again.
     (void)dockLeft;
     (void)dockRight;
+    if (IsDock()) {
+        KeepSecondaryDockRegion(g_dockWnd);
+    }
 
     // The transparent taskbar's shadow: stronger over light windows, and
     // with the mouse on the taskbar.
@@ -3544,6 +3548,12 @@ void SetupDockBehavior(HWND hWnd,
                          winrt::Windows::Foundation::IInspectable const&) {
         if (!g_unloading) {
             Safely(L"Watching the badges", [] { WatchBadgesAndPublish(); });
+            // Every dock's region, in case Windows dropped one.
+            if (IsDock()) {
+                for (const auto& dock : g_secondaryDocks) {
+                    KeepSecondaryDockRegion(dock.hWnd);
+                }
+            }
         }
     });
     g_badgeTimer.Start();
@@ -5079,6 +5089,12 @@ LRESULT CALLBACK TaskbarSubclassProc(HWND hWnd,
     if (uMsg == g_moveDockMessage && g_moveDockMessage) {
         Safely(L"Moving the magnification", [&] { MoveDockBehavior(hWnd); });
         return 0;
+    }
+    // Moved or shown: its region again, if Windows dropped it.
+    if (uMsg == WM_WINDOWPOSCHANGED && IsDock() && !g_unloading) {
+        const LRESULT result = DefSubclassProc(hWnd, uMsg, wParam, lParam);
+        KeepSecondaryDockRegion(hWnd);
+        return result;
     }
     if (uMsg == g_sendTrayIconsMessage && g_sendTrayIconsMessage) {
         g_trayIconsSendPending = false;
