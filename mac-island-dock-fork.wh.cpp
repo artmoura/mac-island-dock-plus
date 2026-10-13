@@ -1152,6 +1152,9 @@ struct {
     int pillMaxWidth;
     // The battery's charge in % next to its icon.
     bool islandBatteryPercent;
+    // The apps with notifications as icons on the island (otherwise only in
+    // the bell's list).
+    bool islandNotificationApps;
     // Panels opening out of the pill as wide as it, when it's wider than
     // them (otherwise they drop out of the clicked item, at their own width).
     bool islandPanelsFollow;
@@ -11112,6 +11115,8 @@ enum class IslandPref {
     Compact,
     // The battery's charge in % (see islandBatteryPercent).
     BatteryPercent,
+    // The apps with notifications on the island (see islandNotificationApps).
+    NotificationApps,
 };
 
 struct IslandPrefInfo {
@@ -11221,6 +11226,9 @@ const IslandPrefInfo kIslandPrefs[] = {
      L"Pílula compacta, expande com o mouse em cima"},
     {IslandPref::BatteryPercent, L"batteryPercent", 0xE83F,
      L"Battery percentage", L"Porcentagem da bateria"},
+    {IslandPref::NotificationApps, L"islandNotificationApps", 0xE71D,
+     L"Apps with notifications on the island (off: only in the bell)",
+     L"Apps com notificações na ilha (desligado: só no sino)"},
 };
 
 // The groups of items on the pill, which can be put in another order in the
@@ -11311,6 +11319,8 @@ bool OnlineGroupAllowed(PillGroup group) {
 // The option that shows a group, or -1 for the ones always there.
 int PillGroupPref(PillGroup group) {
     switch (group) {
+        case PillGroup::Apps:
+            return (int)IslandPref::NotificationApps;
         case PillGroup::Tray:
             return (int)IslandPref::Tray;
         case PillGroup::Network:
@@ -22633,6 +22643,8 @@ void ControlPanel::LayoutSettings() {
             {(int)SettingKind::Pref, (int)IslandPref::BatteryPercent,
              kSectionPill},
             {(int)SettingKind::Pref, (int)IslandPref::Bell, kSectionPill},
+            {(int)SettingKind::Pref, (int)IslandPref::NotificationApps,
+             kSectionPill},
             {(int)SettingKind::Pref, (int)IslandPref::Power, kSectionPill},
             {(int)SettingKind::Pref, (int)IslandPref::AppName, kSectionPill},
             {(int)SettingKind::Pref, (int)IslandPref::ThemeButton,
@@ -28049,6 +28061,17 @@ NotificationPanel::Hit NotificationPanel::HitTest(POINT panelPt) const {
     return {};
 }
 
+// Whether two app IDs are the same app: the same ID, or the same name (the
+// taskbar and the notifications can name an app in other ways).
+bool SameApp(const std::wstring& a, const std::wstring& b) {
+    if (_wcsicmp(a.c_str(), b.c_str()) == 0) {
+        return true;
+    }
+    const std::wstring nameA = AppDisplayName(a);
+    return !nameA.empty() &&
+           _wcsicmp(nameA.c_str(), AppDisplayName(b).c_str()) == 0;
+}
+
 // The app's name, as the Start menu shows it.
 // An app's name, as the Start menu shows it, by its AppUserModelID;
 // remembered.
@@ -30015,6 +30038,8 @@ int GetIslandPref(IslandPref pref) {
             return g_settings.islandCompact;
         case IslandPref::BatteryPercent:
             return g_settings.islandBatteryPercent;
+        case IslandPref::NotificationApps:
+            return g_settings.islandNotificationApps;
     }
     return 0;
 }
@@ -30259,6 +30284,9 @@ void SetIslandPref(IslandPref pref, int value) {
             break;
         case IslandPref::BatteryPercent:
             g_settings.islandBatteryPercent = on;
+            break;
+        case IslandPref::NotificationApps:
+            g_settings.islandNotificationApps = on;
             break;
     }
     if (g_island) {
@@ -30949,6 +30977,8 @@ bool Island::GroupWanted(PillGroup group) const {
         }
     }
     switch (group) {
+        case PillGroup::Apps:
+            return g_settings.islandNotificationApps;
         case PillGroup::Network:
             return g_settings.islandNetwork;
         case PillGroup::Volume:
@@ -36737,6 +36767,18 @@ void Island::UpdateApps() {
             wanted.push_back(app.id);
         }
     }
+    // One icon per app: the taskbar and the notifications can name the same
+    // app in other ways (a program's path, an AppUserModelID), so the ones
+    // with the same name as one before it go.
+    for (size_t i = 0; i < wanted.size(); i++) {
+        for (size_t j = 0; j < i; j++) {
+            if (SameApp(wanted[i], wanted[j])) {
+                wanted.erase(wanted.begin() + i);
+                i--;
+                break;
+            }
+        }
+    }
     // New apps grow in; apps without a badge anymore shrink away.
     bool changed = false;
     for (const auto& id : wanted) {
@@ -36745,7 +36787,7 @@ void Island::UpdateApps() {
         if (it == m_appEntries.end()) {
             m_appEntries.push_back({id});
             changed = true;
-            if (m_minimized && !m_bar) {
+            if (m_minimized && !m_bar && g_settings.islandNotificationApps) {
                 m_peekApp = id;
                 m_peekStart = NowSeconds();
             }
@@ -38120,21 +38162,39 @@ void Island::OnClick(IslandItem item, const std::wstring& appId) {
             // An app with a badge on the taskbar opens; one with unread
             // notifications opens at its latest one, or, with nothing to
             // open, its notifications are shown in the list.
+            // The icon stands for every way of naming the app (see
+            // UpdateApps): its unread notifications under another ID count.
+            std::vector<std::wstring> sameApp;
+            for (const auto& app : m_unreadApps) {
+                if (SameApp(app.id, appId)) {
+                    sameApp.push_back(app.id);
+                }
+            }
             const UnreadApp* unread = FindUnread(appId);
+            if (!unread && !sameApp.empty()) {
+                unread = FindUnread(sameApp.front());
+            }
+            const std::wstring unreadId = unread ? unread->id : appId;
+            auto markAllRead = [&] {
+                MarkAppRead(appId);
+                m_notifications.ClearApp(appId);
+                for (const auto& id : sameApp) {
+                    MarkAppRead(id);
+                    m_notifications.ClearApp(id);
+                }
+            };
             const bool badge = std::find(m_badgeApps.begin(), m_badgeApps.end(),
                                          appId) != m_badgeApps.end();
             if (badge || !unread) {
                 OpenApp(appId);
-                MarkAppRead(appId);
-                m_notifications.ClearApp(appId);
+                markAllRead();
                 break;
             }
             const ToastReply reply = unread->reply;
-            if (OpenNotification(appId, reply)) {
-                MarkAppRead(appId);
-                m_notifications.ClearApp(appId);
+            if (OpenNotification(unreadId, reply)) {
+                markAllRead();
             } else {
-                m_notifications.FocusApp(appId);
+                m_notifications.FocusApp(unreadId);
                 if (!m_notifications.IsOpen()) {
                     TogglePanel(m_notifications, IslandItem::Bell);
                 }
@@ -39152,6 +39212,8 @@ void LoadSettings() {
     g_settings.islandCompact = Wh_GetIntValue(L"islandCompact", 0) != 0;
     g_settings.islandBatteryPercent =
         Wh_GetIntValue(L"batteryPercent", 1) != 0;
+    g_settings.islandNotificationApps =
+        Wh_GetIntValue(L"islandNotificationApps", 1) != 0;
     g_settings.pillMaxWidth =
         std::clamp(Wh_GetIntSetting(L"pillMaxWidth"), 20, 100);
     g_compactGroups =
