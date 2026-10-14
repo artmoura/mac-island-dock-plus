@@ -20690,6 +20690,13 @@ class Island {
     void DestroyMirror(BarMirror& mirror);
     void DestroyMirrors();
     void SetMirrorAppBar(BarMirror& mirror, int height);
+    // The bar's strips (its own and its copies'), registered with Windows
+    // again: Explorer forgets them when it (re)starts, and they can't be
+    // registered before it's ready (as Windows starts).
+    void RegisterAppBars();
+    // Whether a monitor's work area starts under the bar's strip.
+    bool StripKept(HMONITOR monitor) const;
+    void CheckAppBars();
     void ComposeMirrors();
     void VisitMonitor(HMONITOR monitor);
     // The compact pill opened by the mouse on it (see islandCompact); it
@@ -20831,6 +20838,8 @@ class Island {
     double m_mediaDotsVelocity = 0;
     double m_mediaDotsUntil = 0;
     bool m_appBar = false;
+    // Ticks since the strips were last checked (see CheckAppBars).
+    int m_appBarTicks = 0;
     // Windows' dark mode (for the light and dark mode button), and its icon
     // turning half a turn when it's switched (0 light, 1 dark).
     bool m_darkMode = false;
@@ -31679,13 +31688,7 @@ bool Island::Create() {
 
     // The bar reserves its strip at the top of the screen, like the taskbar
     // does at the bottom.
-    if (m_bar) {
-        APPBARDATA data{sizeof(data)};
-        data.hWnd = m_hwnd;
-        data.uCallbackMessage = WM_APP_APPBAR;
-        m_appBar = SHAppBarMessage(ABM_NEW, &data) != FALSE;
-        SetAppBarPosition();
-    }
+    RegisterAppBars();
 
     // The tray icons' names, under them.
     m_tooltip = CreateWindowEx(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, TOOLTIPS_CLASS,
@@ -32048,6 +32051,59 @@ void Island::DestroyMirrors() {
         DestroyMirror(mirror);
     }
     m_mirrors.clear();
+}
+
+void Island::RegisterAppBars() {
+    if (!m_bar || !m_hwnd) {
+        return;
+    }
+    APPBARDATA data{sizeof(data)};
+    data.hWnd = m_hwnd;
+    if (m_appBar) {
+        SHAppBarMessage(ABM_REMOVE, &data);
+    }
+    data.uCallbackMessage = WM_APP_APPBAR;
+    m_appBar = SHAppBarMessage(ABM_NEW, &data) != FALSE;
+    SetAppBarPosition();
+    for (auto& mirror : m_mirrors) {
+        if (!mirror.reserves || !mirror.hwnd) {
+            continue;
+        }
+        APPBARDATA mirrorData{sizeof(mirrorData)};
+        mirrorData.hWnd = mirror.hwnd;
+        if (mirror.appBar) {
+            SHAppBarMessage(ABM_REMOVE, &mirrorData);
+        }
+        mirrorData.uCallbackMessage = WM_APP_APPBAR;
+        mirror.appBar = SHAppBarMessage(ABM_NEW, &mirrorData) != FALSE;
+        SetMirrorAppBar(mirror, std::max((int)m_size.cy, 1));
+    }
+}
+
+bool Island::StripKept(HMONITOR monitor) const {
+    MONITORINFO info{sizeof(info)};
+    if (!GetMonitorInfo(monitor, &info)) {
+        return true;
+    }
+    return info.rcWork.top >= info.rcMonitor.top + m_size.cy - 2;
+}
+
+// Every few seconds: the strips still kept (after Windows started, or
+// Explorer restarted, without the island hearing of it).
+void Island::CheckAppBars() {
+    if (!m_bar || !m_hwnd || m_size.cy <= 0 ||
+        !FindWindow(L"Shell_TrayWnd", nullptr)) {
+        return;
+    }
+    bool lost = !m_appBar ||
+                !StripKept(MirrorsWanted() ? HomeMonitor() : m_monitorHandle);
+    for (const auto& mirror : m_mirrors) {
+        lost = lost || (mirror.reserves && !StripKept(mirror.monitor));
+    }
+    if (lost) {
+        Wh_Log(L"The bar's strip at the top was lost: keeping it again");
+        RegisterAppBars();
+    }
 }
 
 void Island::SetMirrorAppBar(BarMirror& mirror, int height) {
@@ -36640,6 +36696,11 @@ void Island::Tick() {
     CheckMonitor();
     // The bar on the other monitors, as they come and go.
     SyncMirrors();
+    // The bar's strips still kept, every few seconds.
+    if (++m_appBarTicks >= 3) {
+        m_appBarTicks = 0;
+        CheckAppBars();
+    }
     // Not over a full-screen app (a game or a video).
     const bool show = !IsFullscreenAppOn(CurrentMonitor());
     if (show != m_visible) {
@@ -38687,6 +38748,8 @@ LRESULT Island::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam,
     static const UINT taskbarCreated = RegisterWindowMessage(L"TaskbarCreated");
     if (msg == taskbarCreated && taskbarCreated) {
         SayHello();
+        // Explorer started again: it forgot the bar's strips.
+        RegisterAppBars();
         return 0;
     }
     switch (msg) {
