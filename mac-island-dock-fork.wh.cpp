@@ -5462,9 +5462,125 @@ bool IsTaskbarHidden(HWND hTaskbarWnd, const RECT& monitorRect) {
     return (visible.bottom - visible.top) < (rect.bottom - rect.top) / 2;
 }
 
+// A dock left up by mistake (Windows' auto-hide sometimes loses track, after
+// a menu, a notification or a dock shown by the mod itself): shown with the
+// mouse away from it and nothing of the taskbar in use for a while, it's
+// told to hide; if it still stays, auto-hide is switched off and on again,
+// which starts Windows' tracking over (as turning the mod off and on does).
+struct StuckDockWatch {
+    HWND hWnd;
+    ULONGLONG since;
+    ULONGLONG lastTry;
+    int tries;
+};
+constexpr ULONGLONG kStuckDockMs = 2500;
+constexpr ULONGLONG kStuckDockRetryMs = 2000;
+
+// Whether the taskbar is being used: the mouse on one of Explorer's windows
+// (the taskbar, a thumbnail, a jump list), or the focus on the taskbar, a
+// menu, Start or a flyout.
+bool TaskbarInUse(POINT pt) {
+    DWORD processId = 0;
+    if (HWND under = WindowFromPoint(pt);
+        under && GetWindowThreadProcessId(under, &processId) &&
+        processId == GetCurrentProcessId()) {
+        return true;
+    }
+    HWND foreground = GetForegroundWindow();
+    if (!foreground) {
+        return false;
+    }
+    foreground = GetAncestor(foreground, GA_ROOT);
+    if (IsShellWindow(foreground)) {
+        return true;
+    }
+    WCHAR className[64] = L"";
+    GetClassName(foreground, className, ARRAYSIZE(className));
+    for (PCWSTR shellClass :
+         {L"#32768", L"Windows.UI.Core.CoreWindow",
+          L"XamlExplorerHostIslandWindow", L"TaskListThumbnailWnd",
+          L"NotifyIconOverflowWindow", L"TopLevelWindowForOverflowXamlIsland"}) {
+        if (_wcsicmp(className, shellClass) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void CheckStuckDocks(std::vector<StuckDockWatch>& watches, POINT pt) {
+    if (!IsDock() || !SlidesItself() || !g_settings.autoHide || g_unloading) {
+        watches.clear();
+        return;
+    }
+    std::vector<HWND> taskbars;
+    AcquireSRWLockShared(&g_subclassedLock);
+    taskbars = g_subclassedTaskbars;
+    ReleaseSRWLockShared(&g_subclassedLock);
+    std::erase_if(watches, [&](const StuckDockWatch& watch) {
+        return std::find(taskbars.begin(), taskbars.end(), watch.hWnd) ==
+               taskbars.end();
+    });
+    const ULONGLONG now = GetTickCount64();
+    const bool inUse = TaskbarInUse(pt) || g_shownForNotification ||
+                       NowSeconds() < g_keepShownUntil;
+    for (HWND hTaskbarWnd : taskbars) {
+        auto watch =
+            std::find_if(watches.begin(), watches.end(),
+                         [&](const StuckDockWatch& w) { return w.hWnd == hTaskbarWnd; });
+        if (watch == watches.end()) {
+            watches.push_back({hTaskbarWnd, 0, 0, 0});
+            watch = watches.end() - 1;
+        }
+        RECT rect;
+        MONITORINFO info{sizeof(info)};
+        const bool shown =
+            IsWindow(hTaskbarWnd) && GetWindowRect(hTaskbarWnd, &rect) &&
+            GetMonitorInfo(MonitorFromWindow(hTaskbarWnd,
+                                             MONITOR_DEFAULTTONEAREST),
+                           &info) &&
+            !IsTaskbarHidden(hTaskbarWnd, info.rcMonitor);
+        // The mouse near it (with room for the magnified icons) counts as
+        // using it.
+        RECT around = rect;
+        InflateRect(&around, 0, 120);
+        if (!shown || inUse || PtInRect(&around, pt)) {
+            *watch = {hTaskbarWnd, 0, 0, 0};
+            continue;
+        }
+        if (!watch->since) {
+            watch->since = now;
+            continue;
+        }
+        if (now - watch->since < kStuckDockMs + (ULONGLONG)g_settings.hideDelay ||
+            now - watch->lastTry < kStuckDockRetryMs) {
+            continue;
+        }
+        watch->lastTry = now;
+        watch->tries++;
+        if (watch->tries <= 2) {
+            Wh_Log(L"The dock %p stayed up with the mouse away: hiding it",
+                   hTaskbarWnd);
+            PostMessage(hTaskbarWnd, WM_TIMER, kHideTimerId, 0);
+        } else {
+            // Windows' auto-hide lost track of it: started over.
+            Wh_Log(L"The dock %p is stuck up: switching auto-hide off and on",
+                   hTaskbarWnd);
+            APPBARDATA data{sizeof(data)};
+            const UINT state = (UINT)SHAppBarMessage(ABM_GETSTATE, &data);
+            data.lParam = state & ~ABS_AUTOHIDE;
+            SHAppBarMessage(ABM_SETSTATE, &data);
+            Sleep(200);
+            data.lParam = state | ABS_AUTOHIDE;
+            SHAppBarMessage(ABM_SETSTATE, &data);
+            *watch = {hTaskbarWnd, 0, now, 0};
+        }
+    }
+}
+
 DWORD WINAPI EdgeThreadProc(LPVOID) {
     ULONGLONG atEdgeSince = 0;
     ULONGLONG lastRequest = 0;
+    std::vector<StuckDockWatch> stuckWatches;
 
     DWORD wait = kEdgeIdlePollMs;
     while (WaitForSingleObject(g_edgeStopEvent, wait) == WAIT_TIMEOUT) {
@@ -5473,6 +5589,7 @@ DWORD WINAPI EdgeThreadProc(LPVOID) {
         if (!GetCursorPos(&pt)) {
             continue;
         }
+        CheckStuckDocks(stuckWatches, pt);
         HMONITOR monitor = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
         MONITORINFO info{sizeof(info)};
         if (!GetMonitorInfo(monitor, &info)) {
