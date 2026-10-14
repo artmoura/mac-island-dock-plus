@@ -5465,16 +5465,15 @@ bool IsTaskbarHidden(HWND hTaskbarWnd, const RECT& monitorRect) {
 // A dock left up by mistake (Windows' auto-hide sometimes loses track, after
 // a menu, a notification or a dock shown by the mod itself): shown with the
 // mouse away from it and nothing of the taskbar in use for a while, it's
-// told to hide; if it still stays, auto-hide is switched off and on again,
-// which starts Windows' tracking over (as turning the mod off and on does).
+// told to hide (as its own hide timer does).
 struct StuckDockWatch {
     HWND hWnd;
     ULONGLONG since;
     ULONGLONG lastTry;
     int tries;
 };
-constexpr ULONGLONG kStuckDockMs = 2500;
-constexpr ULONGLONG kStuckDockRetryMs = 2000;
+constexpr ULONGLONG kStuckDockMs = 4000;
+constexpr ULONGLONG kStuckDockRetryMs = 3000;
 
 // Whether the taskbar is being used: the mouse on one of Explorer's windows
 // (the taskbar, a thumbnail, a jump list), or the focus on the taskbar, a
@@ -5555,25 +5554,16 @@ void CheckStuckDocks(std::vector<StuckDockWatch>& watches, POINT pt) {
             now - watch->lastTry < kStuckDockRetryMs) {
             continue;
         }
+        // Asked to hide, twice at most while it stays up (switching
+        // auto-hide off and on would resize every window, a flash).
+        if (watch->tries >= 2) {
+            continue;
+        }
         watch->lastTry = now;
         watch->tries++;
-        if (watch->tries <= 2) {
-            Wh_Log(L"The dock %p stayed up with the mouse away: hiding it",
-                   hTaskbarWnd);
-            PostMessage(hTaskbarWnd, WM_TIMER, kHideTimerId, 0);
-        } else {
-            // Windows' auto-hide lost track of it: started over.
-            Wh_Log(L"The dock %p is stuck up: switching auto-hide off and on",
-                   hTaskbarWnd);
-            APPBARDATA data{sizeof(data)};
-            const UINT state = (UINT)SHAppBarMessage(ABM_GETSTATE, &data);
-            data.lParam = state & ~ABS_AUTOHIDE;
-            SHAppBarMessage(ABM_SETSTATE, &data);
-            Sleep(200);
-            data.lParam = state | ABS_AUTOHIDE;
-            SHAppBarMessage(ABM_SETSTATE, &data);
-            *watch = {hTaskbarWnd, 0, now, 0};
-        }
+        Wh_Log(L"The dock %p stayed up with the mouse away: hiding it",
+               hTaskbarWnd);
+        PostMessage(hTaskbarWnd, WM_TIMER, kHideTimerId, 0);
     }
 }
 
